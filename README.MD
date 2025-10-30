@@ -43,29 +43,12 @@ You can test the latest stable version of Milla OS right now!
 
 To build Milla OS, you will need the following tools installed:
 
-* A **C++ cross-compiler** targeting your desired architecture (e.g., `i686-elf-g++`).
-* **Make**
-* **NASM** (Netwide Assembler - for minimal assembly parts)
-* **GRUB Utilities** (e.g., `grub-mkrescue` to create the bootable ISO)
-* **QEMU** (for testing the generated disk image)
 
-#### Build Steps
 
-1.  Clone the repository:
-    ```bash
-    git clone [Your Repository URL]
-    cd milla-os
-    ```
-
-2.  Run the build script:
-    ```bash
-    make all
-    ```
-    This command will compile the kernel, assemble necessary components, and use GRUB to link everything into a bootable disk image (e.g., `millaos.iso`).
 
 #### Running the OS
 
 Use QEMU to boot the generated ISO image:
 
 ```bash
-qemu-system-i386 -cdrom millaos.iso
+qemu-system-i386 -cdrom [filename].iso
