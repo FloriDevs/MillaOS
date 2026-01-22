@@ -2828,7 +2828,7 @@ void MTop() {
       clear_screen(0x03);
       for (int i = 0; i < 80; i++)
         print_char(0, i, ' ', 0x1F);
-      print_string(0, 2, "Milla OS 0.53", 0x1E);
+      print_string(0, 2, "Milla OS 0.6", 0x1E);
       print_string(0, 60, "[F1=MENU]", 0x4F);
       draw_window(3, 10, 12, 60, " Welcome ", 0x0B);
       print_string(5, 15, "Welcome to Milla OS!", 0x70);
