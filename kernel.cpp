@@ -2633,7 +2633,7 @@ void main_menu() {
 
   for (int i = 0; i < 80; i++)
     print_char(0, i, ' ', 0x1F);
-  print_string(0, 2, "Milla OS 0.54 - Start Menu", 0x1E);
+  print_string(0, 2, "Milla OS 0.6 - Start Menu", 0x1E);
 
   draw_window(5, 25, 15, 30, " Menu ", 0x0B); // Höhe angepasst
 
@@ -2716,7 +2716,7 @@ void main_menu() {
       clear_screen(0x03);
       for (int i = 0; i < 80; i++)
         print_char(0, i, ' ', 0x1F);
-      print_string(0, 2, "Milla OS 0.54 - Start Menu", 0x1E);
+      print_string(0, 2, "Milla OS 0.6 - Start Menu", 0x1E);
     }
     // Force redraw on loop
   }
@@ -2731,7 +2731,7 @@ void MTop() {
 
   for (int i = 0; i < 80; i++)
     print_char(0, i, ' ', 0x1F);
-  print_string(0, 2, "Milla OS 0.54", 0x1E);
+  print_string(0, 2, "Milla OS 0.6", 0x1E);
   print_string(0, 60, "[F1=STARTMENU]", 0x4F);
 
   // WIDGET: Clock
