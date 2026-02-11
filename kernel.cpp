@@ -167,6 +167,111 @@ void clear_screen(uint16_t color) {
 }
 
 // ============================================================================
+// MOUSE DRIVER & WALLPAPER
+// ============================================================================
+
+int mouse_x = 40;
+int mouse_y = 12;
+uint8_t mouse_cycle = 0;
+int8_t mouse_byte[3];
+bool mouse_left = false;
+bool mouse_right = false;
+bool mouse_middle = false;
+bool show_wallpaper = false;
+
+void mouse_wait(uint8_t type) {
+  uint32_t timeout = 100000;
+  if (type == 0) {
+    while (timeout--) {
+      if ((inb(0x64) & 1) == 1)
+        return;
+    }
+  } else {
+    while (timeout--) {
+      if ((inb(0x64) & 2) == 0)
+        return;
+    }
+  }
+}
+
+void mouse_write(uint8_t w) {
+  mouse_wait(1);
+  outb(0x64, 0xD4);
+  mouse_wait(1);
+  outb(0x60, w);
+}
+
+uint8_t mouse_read() {
+  mouse_wait(0);
+  return inb(0x60);
+}
+
+void init_mouse() {
+  mouse_wait(1);
+  outb(0x64, 0xA8);
+  mouse_wait(1);
+  outb(0x64, 0x20);
+  mouse_wait(0);
+  uint8_t status = inb(0x60) | 2;
+  mouse_wait(1);
+  outb(0x64, 0x60);
+  mouse_wait(1);
+  outb(0x60, status);
+  mouse_write(0xF6);
+  mouse_read();
+  mouse_write(0xF4);
+  mouse_read();
+}
+
+void handle_mouse_byte(uint8_t b) {
+  if (mouse_cycle == 0) {
+    if ((b & 0x08) == 0x08) {
+      mouse_byte[0] = b;
+      mouse_cycle++;
+    }
+  } else if (mouse_cycle == 1) {
+    mouse_byte[1] = b;
+    mouse_cycle++;
+  } else {
+    mouse_byte[2] = b;
+    mouse_cycle = 0;
+
+    mouse_left = mouse_byte[0] & 1;
+    mouse_right = mouse_byte[0] & 2;
+    mouse_middle = mouse_byte[0] & 4;
+
+    int dx = (int8_t)mouse_byte[1];
+    int dy = (int8_t)mouse_byte[2];
+    mouse_x += dx / 2; // Sensitivity div 2
+    mouse_y -= dy / 2; // Invert Y
+
+    if (mouse_x < 0)
+      mouse_x = 0;
+    if (mouse_x > 79)
+      mouse_x = 79;
+    if (mouse_y < 0)
+      mouse_y = 0;
+    if (mouse_y > 24)
+      mouse_y = 24;
+  }
+}
+
+void draw_wallpaper() {
+  clear_screen(0x20); // Green bg
+  // Daisy Field Pattern
+  for (int y = 0; y < 25; y++) {
+    for (int x = 0; x < 80; x++) {
+      int seed = (x * 37 + y * 89);
+      if (seed % 17 == 0) {
+        print_char(y, x, 'o', 0x2E); // Yellow center
+      } else if ((seed % 17) >= 1 && (seed % 17) <= 4) {
+        print_char(y, x, '*', 0x2F); // White petals
+      }
+    }
+  }
+}
+
+// ============================================================================
 // C-STRING UND SPEICHER FUNKTIONEN (JETZT EXTERN C)
 // ============================================================================
 extern "C" {
@@ -1178,41 +1283,143 @@ ATADevice *active_disk = nullptr; // Zeigt auf die RAM-Disk
 const size_t RAMDISK_SIZE_BYTES = 800 * 1024; // 800KB
 const size_t RAMDISK_SIZE_SECTORS = RAMDISK_SIZE_BYTES / 512;
 uint8_t *ramdisk_storage = nullptr; // Zeiger auf den Speicher der RAM-Disk
-ATADevice ramdisk_device;       // Ein virtuelles ATADevice für die RAM-Disk
-#define RAMDISK_MAGIC_IO 0xDEAD // Eindeutige ID statt I/O-Port
-#define SECTOR_SIZE 512         // Definiert hier, da es global genutzt wird
+ATADevice ramdisk_device;           // Ein virtuelles ATADevice für die RAM-Disk
+#define RAMDISK_MAGIC_IO 0xDEAD     // Eindeutige ID statt I/O-Port
+#define SECTOR_SIZE 512             // Definiert hier, da es global genutzt wird
 // +++ ENDE RAM-DISK IMPLEMENTIERUNG +++
 
+// ============================================================================
+// ATA PIO DRIVER (HDD SUPPORT)
+// ============================================================================
+
+bool ata_identify(ATADevice *dev) {
+  if (dev->io_base == RAMDISK_MAGIC_IO)
+    return true;
+
+  // Select Drive
+  outb(dev->io_base + 6, dev->drive == 0 ? 0xA0 : 0xB0);
+  // Zero Sectorcount & LBA
+  outb(dev->io_base + 2, 0);
+  outb(dev->io_base + 3, 0);
+  outb(dev->io_base + 4, 0);
+  outb(dev->io_base + 5, 0);
+  // Send Command
+  outb(dev->io_base + 7, 0xEC); // IDENTIFY
+
+  // Read Status
+  uint8_t status = inb(dev->io_base + 7);
+  if (status == 0)
+    return false; // No drive
+
+  // Poll until ready or error
+  while (1) {
+    status = inb(dev->io_base + 7);
+    if ((status & 1))
+      return false; // ERR
+    if ((status & 8))
+      break; // DRQ ready
+  }
+
+  // Read 256 words (discard for now, just checking presence)
+  for (int i = 0; i < 256; i++)
+    inw(dev->io_base);
+
+  dev->present = true;
+  dev->size_sectors = 0; // TODO: Parse size from identify data
+  // For now assume standard size or read from MBR/Partition table later
+  // Actually for FAT16 minimal support we just need read/write.
+  return true;
+}
+
+void ata_wait_400ns(uint16_t io_base) {
+  inb(io_base + 7);
+  inb(io_base + 7);
+  inb(io_base + 7);
+  inb(io_base + 7);
+}
+
+// 28-bit LBA PIO Read
+bool ata_read_sector_pio(ATADevice *dev, uint32_t lba, uint8_t *buffer) {
+  // 0xE0 for Master, 0xF0 for Slave + upper 4 bits of LBA
+  uint8_t drive_head = 0xE0 | (dev->drive << 4) | ((lba >> 24) & 0x0F);
+
+  outb(dev->io_base + 6, drive_head); // Drive/Head
+  outb(dev->io_base + 2, 1);          // Count = 1
+  outb(dev->io_base + 3, (uint8_t)lba);
+  outb(dev->io_base + 4, (uint8_t)(lba >> 8));
+  outb(dev->io_base + 5, (uint8_t)(lba >> 16));
+  outb(dev->io_base + 7, 0x20); // COMMAND READ SECTORS
+
+  // Poll
+  while (1) {
+    uint8_t status = inb(dev->io_base + 7);
+    if (status & 1)
+      return false; // ERR
+    if (status & 8)
+      break; // DRQ
+  }
+
+  // Read Data
+  insl(dev->io_base, buffer, 128); // Read 128 uint32s -> 512 bytes
+  ata_wait_400ns(dev->io_base);
+  return true;
+}
+
+// 28-bit LBA PIO Write
+bool ata_write_sector_pio(ATADevice *dev, uint32_t lba, const uint8_t *buffer) {
+  uint8_t drive_head = 0xE0 | (dev->drive << 4) | ((lba >> 24) & 0x0F);
+
+  outb(dev->io_base + 6, drive_head);
+  outb(dev->io_base + 2, 1);
+  outb(dev->io_base + 3, (uint8_t)lba);
+  outb(dev->io_base + 4, (uint8_t)(lba >> 8));
+  outb(dev->io_base + 5, (uint8_t)(lba >> 16));
+  outb(dev->io_base + 7, 0x30); // COMMAND WRITE SECTORS
+
+  // Poll
+  while (1) {
+    uint8_t status = inb(dev->io_base + 7);
+    if (status & 1)
+      return false;
+    if (status & 8)
+      break;
+  }
+
+  // Write Data
+  outsl(dev->io_base, buffer, 128);
+
+  // Flush / Wait
+  outb(dev->io_base + 7, 0xE7); // CACHE FLUSH
+  while (inb(dev->io_base + 7) & 0x80)
+    ; // Wait BSY
+
+  return true;
+}
+
 bool ata_read_sector(ATADevice *dev, uint32_t lba, uint8_t *buffer) {
-  // +++ RAM-DISK LESE-LOGIK +++
   if (dev->io_base == RAMDISK_MAGIC_IO) {
     if (!dev->present || lba >= dev->size_sectors)
       return false;
-
     uint32_t offset = lba * SECTOR_SIZE;
     memcpy(buffer, &ramdisk_storage[offset], SECTOR_SIZE);
     return true;
+  } else {
+    // HDD PIO Read
+    return ata_read_sector_pio(dev, lba, buffer);
   }
-  // +++ ENDE RAM-DISK +++
-
-  // Kein Hardware-Support mehr
-  return false;
 }
 
 bool ata_write_sector(ATADevice *dev, uint32_t lba, const uint8_t *buffer) {
-  // +++ RAM-DISK SCHREIB-LOGIK +++
   if (dev->io_base == RAMDISK_MAGIC_IO) {
     if (!dev->present || lba >= dev->size_sectors)
       return false;
-
     uint32_t offset = lba * SECTOR_SIZE;
     memcpy(&ramdisk_storage[offset], buffer, SECTOR_SIZE);
     return true;
+  } else {
+    // HDD PIO Write
+    return ata_write_sector_pio(dev, lba, buffer);
   }
-  // +++ ENDE RAM-DISK +++
-
-  // Kein Hardware-Support mehr
-  return false;
 }
 
 // ============================================================================
@@ -1695,7 +1902,9 @@ bool write_file(ATADevice *dev, const char *filename, const char *data,
   return ata_write_sector(dev, entry_lba, sector_buffer);
 }
 
-// NUR NOCH RAM-DISK INIT
+// Initialisierung
+ATADevice hdd_device;
+
 void init_filesystem() {
 
   // +++ ERSTELLE RAM-DISK +++
@@ -1723,6 +1932,23 @@ void init_filesystem() {
   }
   // +++ ENDE RAM-DISK ERSTELLUNG +++
 
+  // +++ HDD PROBE +++
+  print_string(21, 45, "Probing HDD...", 0x0E);
+  hdd_device.io_base = 0x1F0; // Primary
+  hdd_device.control_base = 0x3F6;
+  hdd_device.drive = 0; // Master
+  hdd_device.present = false;
+
+  if (ata_identify(&hdd_device)) {
+    print_string(22, 45, "HDD Found (Master)", 0x0A);
+    hdd_device.present = true;
+    hdd_device.size_sectors = 131072; // Assume 64MB for now (TODO: Identify)
+    // We don't mount it as active by default, user must switch
+  } else {
+    print_string(22, 45, "No HDD Found", 0x0C);
+  }
+
+  // Mount RAM Disk by default
   if (active_disk) {
     if (!mount_fat16(active_disk)) {
       // Formatiere wenn Mount fehlschlägt
@@ -1790,12 +2016,66 @@ void draw_flower() {
   print_string_centered(19, "FloriDevs", 0x0F);
 }
 
+// Modified to handle mouse internally
 uint8_t get_keyboard_input() {
-  while ((inb(0x64) & 0x01) == 0)
-    ;
-  return inb(0x60);
+  while (true) {
+    uint8_t status = inb(0x64);
+    if (status & 0x01) {
+      uint8_t data = inb(0x60);
+      if (status & 0x20) {
+        handle_mouse_byte(data);
+        return 0; // Return 0 for mouse update
+      } else {
+        return data;
+      }
+    }
+  }
 }
 
+// ============================================================================
+// SETTINGS
+// ============================================================================
+
+void settings() {
+  bool running = true;
+  int selected = 0;
+
+  while (running) {
+    draw_window(8, 20, 10, 40, " Settings ", 0x0D);
+    print_string(10, 22, "1. Toggle Wallpaper", selected == 0 ? 0x0F : 0x07);
+
+    if (show_wallpaper)
+      print_string(10, 50, "[ON] ", 0x0A);
+    else
+      print_string(10, 50, "[OFF]", 0x0C);
+
+    print_string(12, 22, "2. Exit", selected == 1 ? 0x0F : 0x07);
+
+    // MOUSE CURSOR
+    print_char(mouse_y, mouse_x, 219, 0x0E); // Draw Cursor
+
+    uint8_t sc = get_keyboard_input();
+    print_char(mouse_y, mouse_x, ' ',
+               0x0D); // Erase Cursor (assuming window bg)
+
+    if (sc == 0)
+      continue;
+
+    if (sc == 0x01)
+      running = false;
+    else if (sc == 0x1C) {
+      if (selected == 0) {
+        show_wallpaper = !show_wallpaper;
+      } else {
+        running = false;
+      }
+    } else if (sc == 0x48 || sc == 0x50) {
+      selected = !selected;
+    }
+  }
+}
+
+// Tastaturlayouts
 // Tastaturlayouts
 const char scancode_map_us[] = {
     0,   0,   '1', '2', '3', '4', '5', '6', '7', '8', '9',  '0', '-', '=',  0,
@@ -1808,16 +2088,21 @@ const char scancode_map_us_shift[] = {
     'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~', 0,   '|', 'Z',
     'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?', 0,   0,   0,   ' '};
 const char scancode_map_de[] = {
-    0,   0,   '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '\'', '=', 0,
-    0,   'q', 'w', 'e', 'r', 't', 'z', 'u', 'i', 'o', 'p', 'u', '+',  0,   0,
-    'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', 'o', 'a', '^', 0,    '#', 'y',
-    'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '-', 0,   0,   0,   ' '};
+    0,   0,   '1', '2',        '3',        '4', '5', '6', '7',
+    '8', '9', '0', (char)0xE1, 0x27,       0,   0,   'q', 'w',
+    'e', 'r', 't', 'z',        'u',        'i', 'o', 'p', (char)0x81,
+    '+', 0,   0,   'a',        's',        'd', 'f', 'g', 'h',
+    'j', 'k', 'l', (char)0x94, (char)0x84, '^', 0,   '#', 'y',
+    'x', 'c', 'v', 'b',        'n',        'm', ',', '.', '-',
+    0,   0,   0,   ' '};
 const char scancode_map_de_shift[] = {
-    0,   0,   '!', '"', '\xA7', '$', '%', '^', '&',  '/', '(', ')',
-    '=', '?', '`', 0,   0,      'Q', 'W', 'E', 'R',  'T', 'Z', 'U',
-    'I', 'O', 'P', 'U', '*',    0,   0,   'A', 'S',  'D', 'F', 'G',
-    'H', 'J', 'K', 'L', 'O',    'A', ' ', 0,   '\'', 'Y', 'X', 'C',
-    'V', 'B', 'N', 'M', ';',    ':', '_', 0,   0,    0,   ' '};
+    0,   0,   '!', '"',        0x15,       '$',        '%', '&',  '/',
+    '(', ')', '=', '?',        '`',        0,          0,   'Q',  'W',
+    'E', 'R', 'T', 'Z',        'U',        'I',        'O', 'P',  (char)0x9A,
+    '*', 0,   0,   'A',        'S',        'D',        'F', 'G',  'H',
+    'J', 'K', 'L', (char)0x99, (char)0x8E, (char)0xF8, 0,   '\'', 'Y',
+    'X', 'C', 'V', 'B',        'N',        'M',        ';', ':',  '_',
+    0,   0,   0,   ' '};
 const char *current_scancode_map = scancode_map_de;
 const char *current_scancode_map_shift = scancode_map_de_shift;
 
@@ -1829,6 +2114,9 @@ char scancode_to_ascii(uint8_t scancode, bool shift) {
   return 0;
 }
 
+// Forward declarations
+void milla_ide(const char *filename);
+void doc_editor(const char *filename);
 void text_editor(const char *filename);
 
 // ============================================================================
@@ -1865,7 +2153,7 @@ void file_manager() {
   for (int i = 0; i < 80; i++)
     print_char(0, i, ' ', 0x1F);
   print_string(0, 2, "File Manager - FAT16", 0x1E);
-  print_string(0, 50, "ESC=Exit", 0x1F); // Geändert
+  print_string(0, 50, "F3=Switch Drive ESC=Exit", 0x1F); // Geändert
 
   draw_window(2, 5, 21, 70, " Drives & Files ", 0x0B);
 
@@ -1874,7 +2162,9 @@ void file_manager() {
   // **GEÄNDERT: Nur noch MRD0-Logik**
   char disk_info[50];
   if (active_disk == &ramdisk_device) {
-    string_copy(disk_info, "[MRD0] - "); // GEÄNDERT
+    string_copy(disk_info, "[MRD0] RAM Disk - ");
+  } else if (active_disk == &hdd_device) {
+    string_copy(disk_info, "[HDD0] Hard Disk - ");
   } else {
     string_copy(disk_info, "[---] - ");
   }
@@ -1966,8 +2256,59 @@ void file_manager() {
 
     if (scancode == 0x01) {
       running = false;
-    } else if (scancode == 0x3D) { // F3 - Entfernt
-                                   // Nichts tun
+    } else if (scancode == 0x3D) { // F3 - Switch Drive
+      if (active_disk == &ramdisk_device && hdd_device.present) {
+        active_disk = &hdd_device;
+        // Auto-mount if needed
+        if (!mount_fat16(active_disk)) {
+          // DON'T FORMAT HDD AUTOMATICALLY! Just warn.
+          // But wait, user wants create.sh to format it. So it should be
+          // mounted. If create.sh failed or wasn't run, this might fail.
+        }
+      } else if (active_disk == &hdd_device) {
+        active_disk = &ramdisk_device;
+        mount_fat16(active_disk); // Re-mount RAM disk just in case
+      }
+      // Reload Dir
+      if (active_disk)
+        read_directory(active_disk, root_dir_first_cluster);
+      selected = 0; // Reset scroll
+
+      // Redraw Header
+      clear_screen(0x03);
+      for (int i = 0; i < 80; i++)
+        print_char(0, i, ' ', 0x1F);
+      print_string(0, 2, "File Manager - FAT16", 0x1E);
+      print_string(0, 50, "F3=Switch Drive ESC=Exit", 0x1F);
+      draw_window(2, 5, 21, 70, " Drives & Files ", 0x0B);
+      print_string(3, 8, "Active Drive:", 0x70);
+
+      // Update Disk Info String
+      if (active_disk == &ramdisk_device) {
+        string_copy(disk_info, "[MRD0] RAM Disk - ");
+      } else if (active_disk == &hdd_device) {
+        string_copy(disk_info, "[HDD0] Hard Disk - ");
+      } else {
+        string_copy(disk_info, "[---] - ");
+      }
+      if (active_disk && fs_mounted) {
+        int pos = string_length(disk_info);
+        string_copy(disk_info + pos, "FAT16 (");
+        pos = string_length(disk_info);
+        uint32_t size_kb = (active_disk->size_sectors * 512) / 1024;
+        // ... (Simple size append reused or simplified just print "Ready")
+        string_copy(disk_info + pos, "Ready)");
+      } else {
+        string_copy(disk_info + string_length(disk_info), "No FS / Error");
+      }
+      print_string(4, 8, disk_info, 0x70);
+
+      print_string(7, 8, "Filename", 0x70);
+      print_string(7, 30, "Size", 0x70);
+      print_string(7, 45, "Type", 0x70);
+      for (int i = 0; i < 68; i++)
+        print_char(8, 6 + i, 196, 0x70);
+
     } else if (scancode == 0x48 && selected > 0) {
       selected--;
     } else if (scancode == 0x50 && selected < file_count - 1) {
@@ -1977,6 +2318,12 @@ void file_manager() {
       const char *ext = get_filename_ext(file_cache[selected].name);
       if (string_compare(ext, "TXT")) {
         text_editor(file_cache[selected].name);
+        running = false;
+      } else if (string_compare(ext, "MD")) {
+        doc_editor(file_cache[selected].name);
+        running = false;
+      } else if (string_compare(ext, "MC")) {
+        milla_ide(file_cache[selected].name);
         running = false;
       } else if (string_compare(ext, "CPP")) {
         run_cpp_program(file_cache[selected].name);
@@ -2414,57 +2761,114 @@ void network_status_page() {
   }
 }
 
+// Solitaire helpers
+void solitaire_draw_cursor() {
+  print_char(mouse_y, mouse_x, (char)219, 0x0E); // Cursor
+}
+
+bool check_mouse_click() {
+  static bool old_left = false;
+  bool clicked = (mouse_left && !old_left);
+  old_left = mouse_left;
+  return clicked;
+}
+
 void settings() {
-  clear_screen(0x03);
-
-  for (int i = 0; i < 80; i++)
-    print_char(0, i, ' ', 0x1F);
-  print_string(0, 2, "Settings", 0x1E);
-
-  draw_window(5, 25, 12, 30, " Options ", 0x0B);
-
-  const char *options[] = {"1. Keyboard Layout", "2. Network Status"};
-  int selected = 0;
   bool running = true;
+  int selected = 0;
 
+  // MERGED SETTINGS MENU
   while (running) {
-    for (int i = 0; i < 2; ++i) {
-      uint16_t color = (i == selected) ? 0x07 : 0x70;
-      print_string(7 + i * 2, 28, "                        ", color);
-      print_string(7 + i * 2, 28, options[i], color);
+    // Redraw Background
+    if (show_wallpaper) {
+      // Redraw underlying if transparent...
+      draw_wallpaper(); // Simple redraw
+    } else {
+      clear_screen(0x03);
     }
 
-    print_string_centered(24, "UP/DOWN=Select, ENTER=Open, ESC=Back", 0x70);
+    // Draw Window
+    draw_window(5, 20, 16, 40, " Settings ", 0x0D);
 
-    uint8_t scancode = get_keyboard_input();
+    const char *opts[] = {"1. Toggle Wallpaper", "2. Keyboard Layout",
+                          "3. Network Status", "4. Exit"};
 
-    if (scancode == 0x01) {
-      running = false;
-    } else if (scancode == 0x48 && selected > 0) {
-      selected--;
-    } else if (scancode == 0x50 && selected < 1) {
-      selected++;
-    } else if (scancode == 0x1C) {
-      if (selected == 0) {
-        // Keyboard Layout Logic (Simplified inline or call old function)
-        // Re-using old logic but adapting to menu
-        current_scancode_map = (current_scancode_map == scancode_map_de)
-                                   ? scancode_map_us
-                                   : scancode_map_de;
-        current_scancode_map_shift = (current_scancode_map == scancode_map_de)
-                                         ? scancode_map_de_shift
-                                         : scancode_map_us_shift;
-        print_string(13, 28, "Layout Switched!      ", 0x72);
-        delay(10);
-      } else {
-        network_status_page();
-        // Redraw settings
-        clear_screen(0x03);
-        for (int i = 0; i < 80; i++)
-          print_char(0, i, ' ', 0x1F);
-        print_string(0, 2, "Settings", 0x1E);
-        draw_window(5, 25, 12, 30, " Options ", 0x0B);
+    // Draw Options
+    for (int i = 0; i < 4; i++) {
+      uint16_t col = (selected == i) ? 0x0F : 0x07;
+      print_string(8 + i * 2, 22, opts[i], col);
+
+      // Value next to option
+      if (i == 0) {
+        if (show_wallpaper)
+          print_string(8, 50, "[ON] ", 0x0A);
+        else
+          print_string(8, 50, "[OFF]", 0x0C);
+      } else if (i == 1) {
+        if (current_scancode_map == scancode_map_de)
+          print_string(10, 50, "[DE]", 0x0E);
+        else
+          print_string(10, 50, "[US]", 0x0E);
+      } else if (i == 2) {
+        if (Network::connected)
+          print_string(12, 50, "[OK]", 0x0A);
+        else
+          print_string(12, 50, "[NO]", 0x0C);
       }
+    }
+
+    // MOUSE CURSOR
+    print_char(mouse_y, mouse_x, (char)219, 0x0E);
+
+    uint8_t sc = get_keyboard_input();
+
+    // Erase Cursor (if moved)
+    // Actually, loop redraws everything so erasing specifically is redundant
+    // but safe if partial redraw
+
+    if (sc == 0)
+      continue;
+
+    if (sc == 0x01) { // ESC
+      running = false;
+    } else if (sc == 0x1C) { // ENTER
+      if (selected == 0) {
+        show_wallpaper = !show_wallpaper;
+      } else if (selected == 1) {
+        if (current_scancode_map == scancode_map_de) {
+          current_scancode_map = scancode_map_us;
+          current_scancode_map_shift = scancode_map_us_shift;
+        } else {
+          current_scancode_map = scancode_map_de;
+          current_scancode_map_shift = scancode_map_de_shift;
+        }
+      } else if (selected == 2) {
+        // Network Info Popup
+        draw_window(8, 15, 12, 50, " Network Info ", 0x09);
+        print_string(10, 18, "MAC: ", 0x0F);
+        // print_string(10, 23, Network::get_mac_address_str(), 0x0F); // Helper
+        // missing sometimes
+        char mac_buf[20];
+        // Re-implement simplified MAC str if needed or use existing
+        // Assuming existing helper is available or we skip detailed MAC for
+        // now.
+
+        if (Network::connected)
+          print_string(12, 18, "Status: Connected", 0x0A);
+        else
+          print_string(12, 18, "Status: Disconnected", 0x0C);
+
+        print_string(16, 18, "Press any key...", 0x07);
+        get_keyboard_input();
+      } else if (selected == 3) {
+        running = false;
+      }
+    } else if (sc == 0x48) { // Up
+      if (selected > 0)
+        selected--;
+    } else if (sc == 0x50) { // Down
+      if (selected < 3)
+        selected++;
     }
   }
 }
@@ -2625,33 +3029,1029 @@ void browser() {
 }
 
 // ============================================================================
+// MILLA LANG
+// ============================================================================
+
+struct MillaVar {
+  char name[32];
+  char value[64];
+  bool in_use;
+};
+
+MillaVar milla_vars[20];
+char milla_log[20][80]; // Console history
+int milla_log_count = 0;
+
+// Random Number Generator (LCG)
+unsigned long milla_rand_seed = 123456789;
+int milla_rand(int min, int max) {
+  milla_rand_seed = milla_rand_seed * 1103515245 + 12345;
+  unsigned int r = (unsigned int)(milla_rand_seed / 65536) % 32768;
+  if (min > max) {
+    int t = min;
+    min = max;
+    max = t;
+  }
+  return min + (r % (max - min + 1));
+}
+
+// Helper: Parse integer
+int milla_atoi(const char *s) {
+  int res = 0;
+  int sign = 1;
+  int i = 0;
+  if (s[0] == '-') {
+    sign = -1;
+    i++;
+  }
+  for (; s[i] != '\0'; ++i) {
+    if (s[i] >= '0' && s[i] <= '9')
+      res = res * 10 + s[i] - '0';
+  }
+  return sign * res;
+}
+
+// Helper: Int to String
+void milla_itoa(int n, char *s) {
+  int i = 0, sign = n;
+  if (n < 0)
+    n = -n;
+  do {
+    s[i++] = n % 10 + '0';
+  } while ((n /= 10) > 0);
+  if (sign < 0)
+    s[i++] = '-';
+  s[i] = '\0';
+  // Reverse
+  for (int j = 0, k = i - 1; j < k; j++, k--) {
+    char t = s[j];
+    s[j] = s[k];
+    s[k] = t;
+  }
+}
+
+// Add line to log
+void milla_print(const char *msg) {
+  if (milla_log_count < 20) {
+    string_copy(milla_log[milla_log_count], msg);
+    milla_log_count++;
+  } else {
+    // Shift up
+    for (int i = 0; i < 19; i++)
+      string_copy(milla_log[i], milla_log[i + 1]);
+    string_copy(milla_log[19], msg);
+  }
+}
+
+// Evaluate command
+void milla_eval(const char *cmd) {
+  char buffer[80];
+  string_copy(buffer, cmd);
+
+  // Tokenize (simple space split)
+  char arg1[32] = "";
+  char arg2[32] = "";
+  char arg3[32] = ""; // Extra arg
+  char command[32] = "";
+
+  int space1 = -1, space2 = -1, space3 = -1;
+  int len = string_length(buffer);
+
+  // Find spaces
+  for (int i = 0; i < len; i++) {
+    if (buffer[i] == ' ') {
+      if (space1 == -1)
+        space1 = i;
+      else if (space2 == -1)
+        space2 = i;
+      else if (space3 == -1)
+        space3 = i;
+    }
+  }
+
+  // Extract command
+  int cmd_len = (space1 == -1) ? len : space1;
+  for (int i = 0; i < cmd_len && i < 31; i++)
+    command[i] = buffer[i];
+  command[cmd_len] = '\0';
+
+  // Extract Arg1
+  if (space1 != -1) {
+    int start = space1 + 1;
+    int end = (space2 == -1) ? len : space2;
+    int k = 0;
+    for (int i = start; i < end && k < 31; i++)
+      arg1[k++] = buffer[i];
+    arg1[k] = '\0';
+  }
+
+  // Extract Arg2
+  if (space2 != -1) {
+    int start = space2 + 1;
+    int end = (space3 == -1) ? len : space3;
+    int k = 0;
+    for (int i = start; i < end && k < 31; i++)
+      arg2[k++] = buffer[i];
+    arg2[k] = '\0';
+  }
+
+  // Extract Arg3
+  if (space3 != -1) {
+    int start = space3 + 1;
+    int end = len;
+    int k = 0;
+    for (int i = start; i < end && k < 31; i++)
+      arg3[k++] = buffer[i];
+    arg3[k] = '\0';
+  }
+
+  // --- COMMANDS ---
+
+  if (string_compare(command, "PRINT")) {
+    if (arg1[0] == '"') {
+      // String literal: Remove quotes (simple)
+      char output[64];
+      int k = 0;
+      for (int i = 1; arg1[i] != '\0' && arg1[i] != '"'; i++)
+        output[k++] = arg1[i];
+      output[k] = '\0';
+      milla_print(output);
+    } else {
+      // Variable lookup
+      bool found = false;
+      for (int i = 0; i < 20; i++) {
+        if (milla_vars[i].in_use && string_compare(milla_vars[i].name, arg1)) {
+          milla_print(milla_vars[i].value);
+          found = true;
+          break;
+        }
+      }
+      if (!found)
+        milla_print("Error: Var not found");
+    }
+
+  } else if (string_compare(command, "VAR")) {
+    // VAR x = val
+    if (string_compare(arg2, "=")) {
+      // Save variable
+      bool found = false;
+      // Update existing
+      for (int i = 0; i < 20; i++) {
+        if (milla_vars[i].in_use && string_compare(milla_vars[i].name, arg1)) {
+          string_copy(milla_vars[i].value, arg3);
+          found = true;
+          milla_print("Var updated.");
+          break;
+        }
+      }
+      // Create new
+      if (!found) {
+        for (int i = 0; i < 20; i++) {
+          if (!milla_vars[i].in_use) {
+            string_copy(milla_vars[i].name, arg1);
+            string_copy(milla_vars[i].value, arg3);
+            milla_vars[i].in_use = true;
+            milla_print("Var set.");
+            break;
+          }
+        }
+      }
+    } else {
+      milla_print("Syntax: VAR name = value");
+    }
+
+  } else if (string_compare(command, "RANDOM")) {
+    // RANDOM min max
+    int min = milla_atoi(arg1);
+    int max = milla_atoi(arg2);
+    int r = milla_rand(min, max);
+    char r_str[32];
+    milla_itoa(r, r_str);
+    char msg[60] = "Random: ";
+    int l = 8;
+    for (int i = 0; r_str[i] != 0; i++)
+      msg[l++] = r_str[i];
+    msg[l] = '\0';
+    milla_print(msg);
+
+  } else if (string_compare(command, "CALC")) {
+    // CALC 1 + 1 (arg1 op arg2)
+    int v1 = 0, v2 = 0;
+
+    // Parse v1
+    if (arg1[0] >= '0' && arg1[0] <= '9')
+      v1 = milla_atoi(arg1);
+    else {
+      for (int i = 0; i < 20; i++)
+        if (milla_vars[i].in_use && string_compare(milla_vars[i].name, arg1))
+          v1 = milla_atoi(milla_vars[i].value);
+    }
+
+    char op = arg2[0];
+    if (arg3[0] >= '0' && arg3[0] <= '9')
+      v2 = milla_atoi(arg3);
+    else {
+      for (int i = 0; i < 20; i++)
+        if (milla_vars[i].in_use && string_compare(milla_vars[i].name, arg3))
+          v2 = milla_atoi(milla_vars[i].value);
+    }
+
+    int res = 0;
+    if (op == '+')
+      res = v1 + v2;
+    else if (op == '-')
+      res = v1 - v2;
+    else if (op == '*')
+      res = v1 * v2;
+    else if (op == '/') {
+      if (v2 != 0)
+        res = v1 / v2;
+    }
+
+    char r_str[32];
+    milla_itoa(res, r_str);
+    char msg[60] = "Result: ";
+    int l = 8;
+    for (int i = 0; r_str[i] != 0; i++)
+      msg[l++] = r_str[i];
+    msg[l] = '\0';
+    milla_print(msg);
+
+  } else if (string_compare(command, "CLS")) {
+    milla_log_count = 0;
+    milla_print("Cleared.");
+  } else if (string_compare(command, "HELP")) {
+    milla_print("Cmds: PRINT, VAR, RANDOM, CALC");
+  } else {
+    if (string_length(command) > 0)
+      milla_print("Unknown Command");
+  }
+}
+
+// Run a full script buffer
+void milla_run_script(const char *script) {
+  milla_print("--- Running Script ---");
+  char line_buffer[80];
+  int line_pos = 0;
+
+  for (int i = 0; script[i] != '\0'; i++) {
+    char c = script[i];
+    if (c == '\n') {
+      line_buffer[line_pos] = '\0';
+      if (line_pos > 0)
+        milla_eval(line_buffer);
+      line_pos = 0;
+    } else {
+      if (line_pos < 79)
+        line_buffer[line_pos++] = c;
+    }
+  }
+  // Last line
+  if (line_pos > 0) {
+    line_buffer[line_pos] = '\0';
+    milla_eval(line_buffer);
+  }
+  milla_print("--- Finished ---");
+}
+
+void milla_lang() {
+  clear_screen(0x0F);
+  milla_log_count = 0; // Reset log on start
+  milla_print("Welcome to Milla Lang v1.0");
+  milla_print("Type HELP for commands. ESC to exit.");
+
+  char input[80] = "";
+  int input_len = 0;
+  bool running = true;
+  bool shift = false;
+
+  while (running) {
+    // Draw Interface
+    draw_window(0, 0, 2, 80, " Milla Lang REPL ", 0x0B);
+
+    // Draw Log
+    for (int i = 0; i < 20; i++) {
+      // Clear line
+      for (int x = 0; x < 80; x++)
+        print_char(3 + i, x, ' ', 0x0F);
+      // Print log
+      if (i < milla_log_count)
+        print_string(3 + i, 2, milla_log[i], 0x0F);
+    }
+
+    // Draw Input Line
+    for (int x = 0; x < 80; x++)
+      print_char(24, x, ' ', 0x1F);
+    print_string(24, 0, "> ", 0x1E);
+    print_string(24, 2, input, 0x1F);
+    print_char(24, 2 + input_len, 219, 0x1E); // Cursor
+
+    // Input Handling
+    uint8_t sc = get_keyboard_input();
+
+    if (sc == 0x01) { // ESC
+      running = false;
+    } else if (sc == 0x1C) { // ENTER
+      milla_print(input);    // Echo input
+      milla_eval(input);
+      input[0] = '\0';
+      input_len = 0;
+    } else if (sc == 0x0E) { // Backspace
+      if (input_len > 0) {
+        input_len--;
+        input[input_len] = '\0';
+      }
+    } else if (sc == 0x2A || sc == 0x36) {
+      shift = true;
+    } else if (sc == 0xAA || sc == 0xB6) {
+      shift = false;
+    } else {
+      char c = scancode_to_ascii(sc, shift);
+      if (c != 0 && input_len < 75) {
+        input[input_len++] = c;
+        input[input_len] = '\0';
+      }
+    }
+  }
+}
+
+// IDE for MillaCode
+void milla_ide(const char *filename) {
+  // Reusing Editor Buffer logic
+  // Clear buffer first
+  for (int i = 0; i < EDITOR_BUFFER_SIZE; i++)
+    editor_buffer[i] = ' ';
+
+  int file_idx = find_file(filename);
+  int buffer_pos = 0;
+
+  if (file_idx != -1 && fs_mounted && active_disk) {
+    read_file(active_disk, file_cache[file_idx].first_cluster, editor_buffer,
+              file_cache[file_idx].size < EDITOR_BUFFER_SIZE
+                  ? file_cache[file_idx].size
+                  : EDITOR_BUFFER_SIZE);
+    buffer_pos = file_cache[file_idx].size;
+  }
+
+  // Fill rest with spaces
+  for (int i = buffer_pos; i < EDITOR_BUFFER_SIZE; i++)
+    editor_buffer[i] = ' ';
+
+  int cursor_row = 1;
+  int cursor_col = 0;
+  bool shift = false;
+  bool running = true;
+  bool show_help = false;
+
+  while (running) {
+    // Draw Header
+    draw_window(0, 0, 2, 80, " MillaCode IDE ", 0x09);
+    print_string(0, 60, "F1:Help F5:Run TAB:Auto", 0x0F);
+    print_string(0, 2, filename, 0x0E);
+
+    // Draw Content (Syntax Highlighting)
+    for (int row = 1; row < 24; row++) {
+      for (int col = 0; col < 80; col++) {
+        int pos = (row - 1) * 80 + col;
+        if (pos < EDITOR_BUFFER_SIZE) {
+          char c = editor_buffer[pos];
+          if (c == '\n')
+            c = ' ';
+
+          uint16_t color = 0x0F;
+          // Very Basic Keyword Highlighting check (slow but works for small
+          // screen) Check if we are at start of a keyword? To keep it simple,
+          // just highlight Uppercase words?
+          if (c >= 'A' && c <= 'Z')
+            color = 0x0B; // Cyan for commands
+
+          print_char(row, col, c, color);
+        }
+      }
+    }
+
+    // Draw Help Overlay if active
+    if (show_help) {
+      draw_window(5, 10, 15, 60, " MillaCode Help ", 0x4F);
+      print_string(7, 12, "PRINT \"Text\" : Show text", 0x4F);
+      print_string(8, 12, "VAR x = val  : Set variable", 0x4F);
+      print_string(9, 12, "CALC 1 + 1   : Calculate", 0x4F);
+      print_string(10, 12, "RANDOM 1 10  : Random Num", 0x4F);
+      print_string(18, 12, "Press F1 to Close", 0x4F);
+    }
+
+    // Draw Cursor
+    if (!show_help)
+      print_char(cursor_row, cursor_col, 219, 0x0E);
+
+    uint8_t sc = get_keyboard_input();
+
+    if (sc == 0x01) { // ESC
+      running = false;
+    } else if (sc == 0x3B) { // F1 Help
+      show_help = !show_help;
+      // Force redraw
+      clear_screen(0x00);
+    } else if (sc == 0x3F) { // F5 Run
+      // Save first (auto-save for run)
+      // Calculate size
+      int actual_size = EDITOR_BUFFER_SIZE - 1;
+      while (actual_size >= 0 && (editor_buffer[actual_size] == ' ' ||
+                                  editor_buffer[actual_size] == '\0' ||
+                                  editor_buffer[actual_size] == '\n')) {
+        actual_size--;
+      }
+      write_file(active_disk, filename, editor_buffer, actual_size + 1);
+
+      // EXECUTE
+      milla_lang(); // Switch to REPL context
+      milla_print("--- IDE RUN ---");
+
+      // Need a temp buffer copy for run script because REPL uses its own loops?
+      // Actually milla_run_script parses buffers
+      // Create a null-terminated copy of editor buffer (run time copy)
+      // Warning: Stack size.
+      // We'll just pass editor_buffer directly assuming it's safeish (might
+      // have spaces at end)
+      char *run_buf = (char *)malloc(actual_size + 2);
+      if (run_buf) {
+        for (int i = 0; i <= actual_size; i++)
+          run_buf[i] = editor_buffer[i];
+        run_buf[actual_size + 1] = '\0';
+        milla_run_script(run_buf);
+        free(run_buf);
+      }
+
+      // Wait for key
+      print_string(24, 0, "Press Any Key...", 0x8E);
+      get_keyboard_input();
+      clear_screen(0x00);                  // Clear back for IDE
+    } else if (sc == 0x0F && !show_help) { // TAB - Autocomplete
+      // Find word before cursor
+      int p = (cursor_row - 1) * 80 + cursor_col;
+      if (p > 0) {
+        char prefix[10];
+        int len = 0;
+        int start = p - 1;
+        while (start >= 0 && editor_buffer[start] != ' ' &&
+               editor_buffer[start] != '\n' && len < 8) {
+          start--;
+        }
+        start++; // Move back to first char
+        // Copy prefix
+        for (int i = start; i < p; i++) {
+          char c = editor_buffer[i];
+          if (c >= 'a' && c <= 'z')
+            c -= 32; // To upper
+          prefix[len++] = c;
+        }
+        prefix[len] = '\0';
+
+        const char *prediction = nullptr;
+        if (string_compare(prefix, "P") || string_compare(prefix, "PR"))
+          prediction = "PRINT ";
+        else if (string_compare(prefix, "V") || string_compare(prefix, "VA"))
+          prediction = "VAR ";
+        else if (string_compare(prefix, "R") || string_compare(prefix, "RA"))
+          prediction = "RANDOM ";
+        else if (string_compare(prefix, "C") || string_compare(prefix, "CA"))
+          prediction = "CALC ";
+
+        if (prediction) {
+          // Insert prediction
+          // 1. Remove typed prefix
+          for (int i = 0; i < len; i++) {
+            // Backspace logic locally
+            cursor_col--;
+            p--;
+          }
+          // 2. Insert full word
+          int pred_len = string_length(prediction);
+          for (int i = 0; i < pred_len; i++) {
+            if (p < EDITOR_BUFFER_SIZE) {
+              editor_buffer[p++] = prediction[i];
+              cursor_col++;
+            }
+          }
+        }
+      }
+    } else if (!show_help) {
+      // Standard Editor Logic (Simplified copy)
+      if (sc == 0x2A || sc == 0x36)
+        shift = true;
+      else if (sc == 0xAA || sc == 0xB6)
+        shift = false;
+      else if (sc == 0x48 && cursor_row > 1)
+        cursor_row--;
+      else if (sc == 0x50 && cursor_row < 23)
+        cursor_row++;
+      else if (sc == 0x4B && cursor_col > 0)
+        cursor_col--;
+      else if (sc == 0x4D && cursor_col < 79)
+        cursor_col++;
+      else if (sc == 0x0E) { // Backspace
+        int pos = (cursor_row - 1) * 80 + cursor_col;
+        if (pos > 0) {
+          if (cursor_col > 0)
+            cursor_col--;
+          else if (cursor_row > 1) {
+            cursor_row--;
+            cursor_col = 79;
+          }
+          // Shift buffer
+          int new_pos = (cursor_row - 1) * 80 + cursor_col;
+          for (int i = new_pos; i < EDITOR_BUFFER_SIZE - 1; i++)
+            editor_buffer[i] = editor_buffer[i + 1];
+        }
+      } else if (sc == 0x1C) { // Enter
+        if (cursor_row < 23) {
+          cursor_row++;
+          cursor_col = 0;
+        }
+      } else {
+        char c = scancode_to_ascii(sc, shift);
+        if (c != 0) {
+          int pos = (cursor_row - 1) * 80 + cursor_col;
+          if (pos < EDITOR_BUFFER_SIZE) {
+            editor_buffer[pos] = c;
+            if (cursor_col < 79)
+              cursor_col++;
+            else if (cursor_row < 23) {
+              cursor_row++;
+              cursor_col = 0;
+            }
+          }
+        }
+      }
+    }
+  }
+  // Save on exit? optional.
+}
+
+// DOC Editor (Markdown-like)
+void doc_editor(const char *filename) {
+  // Reusing Editor Buffer logic
+  for (int i = 0; i < EDITOR_BUFFER_SIZE; i++)
+    editor_buffer[i] = ' ';
+
+  int file_idx = find_file(filename);
+  int buffer_pos = 0;
+
+  if (file_idx != -1 && fs_mounted && active_disk) {
+    read_file(active_disk, file_cache[file_idx].first_cluster, editor_buffer,
+              file_cache[file_idx].size < EDITOR_BUFFER_SIZE
+                  ? file_cache[file_idx].size
+                  : EDITOR_BUFFER_SIZE);
+    buffer_pos = file_cache[file_idx].size;
+  }
+  for (int i = buffer_pos; i < EDITOR_BUFFER_SIZE; i++)
+    editor_buffer[i] = ' ';
+
+  int cursor_row = 1;
+  int cursor_col = 0;
+  bool shift = false;
+  bool running = true;
+
+  while (running) {
+    // MD Style Header
+    draw_window(0, 0, 2, 80, " MillaWriter (MD) ", 0x0D); // Magenta
+    print_string(0, 60, "F1:Save ESC:Exit", 0x1F);
+    print_string(0, 2, filename, 0x1E);
+
+    // Render loop with Markdown Syntax Highlighting
+    for (int row = 1; row < 24; row++) {
+      bool is_header = false;
+      // Check start of line for #
+      int line_start = (row - 1) * 80;
+      if (line_start < EDITOR_BUFFER_SIZE && editor_buffer[line_start] == '#')
+        is_header = true;
+
+      for (int col = 0; col < 80; col++) {
+        int pos = (row - 1) * 80 + col;
+        if (pos < EDITOR_BUFFER_SIZE) {
+          char c = editor_buffer[pos];
+          if (c == '\n')
+            c = ' ';
+          uint16_t color = 0x0F;
+
+          if (is_header)
+            color = 0x0E; // Yellow for headers
+          if (c == '*' || c == '_')
+            color = 0x0A; // Green for syntax
+
+          print_char(row, col, c, color);
+        }
+      }
+    }
+    print_char(cursor_row, cursor_col, 219, 0x0D);
+
+    uint8_t sc = get_keyboard_input();
+
+    if (sc == 0x01)
+      running = false;
+    else if (sc == 0x3B) { // F1 Save
+      int actual_size = EDITOR_BUFFER_SIZE - 1;
+      while (actual_size >= 0 && (editor_buffer[actual_size] == ' ' ||
+                                  editor_buffer[actual_size] == '\0' ||
+                                  editor_buffer[actual_size] == '\n'))
+        actual_size--;
+      write_file(active_disk, filename, editor_buffer, actual_size + 1);
+      print_string(24, 60, "Saved!", 0x2A);
+      delay(10);
+    } else {
+      // Standard edit logic
+      if (sc == 0x2A || sc == 0x36)
+        shift = true;
+      else if (sc == 0xAA || sc == 0xB6)
+        shift = false;
+      else if (sc == 0x48 && cursor_row > 1)
+        cursor_row--;
+      else if (sc == 0x50 && cursor_row < 23)
+        cursor_row++;
+      else if (sc == 0x4B && cursor_col > 0)
+        cursor_col--;
+      else if (sc == 0x4D && cursor_col < 79)
+        cursor_col++;
+      else if (sc == 0x0E) { // Backspace
+        int pos = (cursor_row - 1) * 80 + cursor_col;
+        if (pos > 0) {
+          if (cursor_col > 0)
+            cursor_col--;
+          else if (cursor_row > 1) {
+            cursor_row--;
+            cursor_col = 79;
+          }
+          int new_pos = (cursor_row - 1) * 80 + cursor_col;
+          for (int i = new_pos; i < EDITOR_BUFFER_SIZE - 1; i++)
+            editor_buffer[i] = editor_buffer[i + 1];
+        }
+      } else if (sc == 0x1C) { // Enter
+        if (cursor_row < 23) {
+          cursor_row++;
+          cursor_col = 0;
+        }
+      } else {
+        char c = scancode_to_ascii(sc, shift);
+        if (c != 0) {
+          int pos = (cursor_row - 1) * 80 + cursor_col;
+          if (pos < EDITOR_BUFFER_SIZE) {
+            editor_buffer[pos] = c;
+            if (cursor_col < 79)
+              cursor_col++;
+            else if (cursor_row < 23) {
+              cursor_row++;
+              cursor_col = 0;
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// ============================================================================
+// SOLITAIRE GAME
+// ============================================================================
+
+struct Card {
+  uint8_t rank; // 0=A, 1=2, ... 9=10, 10=J, 11=Q, 12=K
+  uint8_t suit; // 0=HEARTS, 1=DIAMONDS, 2=CLUBS, 3=SPADES
+  bool face_up;
+};
+
+// Game State
+Card piles[13][52]; // 0-6: Tableau, 7-10: Foundation, 11: Stock, 12: Waste
+int pile_counts[13];
+
+// Random need seed from time or user interaction
+void shuffle_deck(Card *deck, int count) {
+  for (int i = 0; i < count; i++) {
+    int r = milla_rand(0, count - 1);
+    Card temp = deck[i];
+    deck[i] = deck[r];
+    deck[r] = temp;
+  }
+}
+
+void init_solitaire() {
+  Card full_deck[52];
+  int idx = 0;
+  for (int s = 0; s < 4; s++) {
+    for (int r = 0; r < 13; r++) {
+      full_deck[idx].rank = r;
+      full_deck[idx].suit = s;
+      full_deck[idx].face_up = false;
+      idx++;
+    }
+  }
+  shuffle_deck(full_deck, 52);
+
+  int card_idx = 0;
+  for (int i = 0; i < 7; i++) {
+    pile_counts[i] = i + 1;
+    for (int j = 0; j < i + 1; j++) {
+      piles[i][j] = full_deck[card_idx++];
+      if (j == i)
+        piles[i][j].face_up = true;
+    }
+  }
+
+  pile_counts[11] = 0;
+  while (card_idx < 52) {
+    piles[11][pile_counts[11]] = full_deck[card_idx++];
+    piles[11][pile_counts[11]].face_up = false;
+    pile_counts[11]++;
+  }
+
+  for (int i = 7; i <= 10; i++)
+    pile_counts[i] = 0;
+  pile_counts[12] = 0;
+}
+
+void draw_card(int row, int col, Card c, bool selected) {
+  uint16_t bg = selected ? 0x20 : 0x70;
+  if (!c.face_up) {
+    print_string(row, col, "[##]", 0x1F | (selected ? 0x20 : 0x00));
+    return;
+  }
+
+  uint16_t color = (c.suit < 2) ? 0x0C : 0x00;
+  color |= bg;
+
+  char face[5];
+  face[0] = '[';
+  int pos = 1;
+  if (c.rank == 0)
+    face[pos++] = 'A';
+  else if (c.rank >= 1 && c.rank <= 8)
+    face[pos++] = '1' + c.rank;
+  else if (c.rank == 9) {
+    face[pos++] = '1';
+    face[pos++] = '0';
+  } else if (c.rank == 10)
+    face[pos++] = 'J';
+  else if (c.rank == 11)
+    face[pos++] = 'Q';
+  else if (c.rank == 12)
+    face[pos++] = 'K';
+
+  face[pos++] = 3 + c.suit;
+  face[pos++] = ']';
+  face[pos] = '\0';
+
+  print_string(row, col, face, color);
+}
+
+void draw_placeholder(int row, int col, bool selected) {
+  uint16_t color = selected ? 0x2F : 0x70;
+  print_string(row, col, "[  ]", color);
+}
+
+void solitaire() {
+  init_solitaire();
+
+  int cur_pile = 0;
+  int src_pile = -1;
+  bool running = true;
+  bool redraw = true;
+  for (int i = 0; i < (get_keyboard_input() % 10); i++)
+    milla_rand(0, 10);
+
+  while (running) {
+    if (redraw) {
+      clear_screen(0x03);
+      print_string(0, 0, " MillaSolitaire ", 0x3F);
+      print_string(0, 60, "Arrows=Move SPC=Sel Q=Quit", 0x3F);
+
+      if (pile_counts[11] > 0)
+        draw_card(2, 2, piles[11][pile_counts[11] - 1], cur_pile == 11);
+      else
+        draw_placeholder(2, 2, cur_pile == 11);
+      if (cur_pile == 11 && pile_counts[11] == 0)
+        print_string(3, 2, "R", 0x30);
+
+      if (pile_counts[12] > 0)
+        draw_card(2, 8, piles[12][pile_counts[12] - 1], cur_pile == 12);
+      else
+        draw_placeholder(2, 8, cur_pile == 12);
+
+      for (int i = 0; i < 4; i++) {
+        int pid = 7 + i;
+        int col = 30 + i * 6;
+        if (pile_counts[pid] > 0)
+          draw_card(2, col, piles[pid][pile_counts[pid] - 1], cur_pile == pid);
+        else {
+          draw_placeholder(2, col, cur_pile == pid);
+          char s[2] = {(char)(3 + i), 0};
+          print_string(2, col + 1, s, (i < 2 ? 0x0C : 0x00) | 0x70);
+        }
+      }
+
+      for (int i = 0; i < 7; i++) {
+        int col = 2 + i * 8;
+        if (pile_counts[i] == 0) {
+          draw_placeholder(6, col, cur_pile == i && src_pile != i);
+        } else {
+          for (int j = 0; j < pile_counts[i]; j++) {
+            int row = 6 + j;
+            if (row > 23)
+              row = 23;
+            bool is_top = (j == pile_counts[i] - 1);
+            bool selected = (cur_pile == i && is_top);
+            if (src_pile == i && is_top)
+              selected = true;
+
+            draw_card(row, col, piles[i][j], selected);
+          }
+        }
+        if (pile_counts[i] == 0 && cur_pile == i) {
+          draw_placeholder(6, col, true);
+        }
+      }
+
+      if (src_pile != -1) {
+        char status[30];
+        string_copy(status, "Selected: ");
+        if (src_pile == 11)
+          string_copy(status + 10, "Stock");
+        else if (src_pile == 12)
+          string_copy(status + 10, "Waste");
+        else if (src_pile < 7) {
+          string_copy(status + 10, "Col");
+          status[13] = '1' + src_pile;
+          status[14] = 0;
+        }
+        print_string(24, 2, status, 0x1E);
+      }
+      redraw = false;
+    }
+
+    uint8_t sc = get_keyboard_input();
+
+    if (sc == 0x01 || sc == 0x10) {
+      running = false;
+    } else if (sc == 0x4B) {
+      if (cur_pile == 7)
+        cur_pile = 12;
+      else if (cur_pile == 12)
+        cur_pile = 11;
+      else if (cur_pile > 0 && cur_pile < 7)
+        cur_pile--;
+      else if (cur_pile > 7)
+        cur_pile--;
+      else if (cur_pile == 0)
+        cur_pile = 6;
+      redraw = true;
+    } else if (sc == 0x4D) {
+      if (cur_pile == 11)
+        cur_pile = 12;
+      else if (cur_pile == 12)
+        cur_pile = 7;
+      else if (cur_pile < 6)
+        cur_pile++;
+      else if (cur_pile >= 7 && cur_pile < 10)
+        cur_pile++;
+      else if (cur_pile == 10)
+        cur_pile = 0;
+      redraw = true;
+    } else if (sc == 0x48) {
+      if (cur_pile < 7) {
+        if (cur_pile < 2)
+          cur_pile = 11 + cur_pile;
+        else
+          cur_pile = 7 + (cur_pile - 3);
+        if (cur_pile > 10)
+          cur_pile = 10;
+      }
+      redraw = true;
+    } else if (sc == 0x50) {
+      if (cur_pile >= 7) {
+        cur_pile = (cur_pile - 7) * 2;
+        if (cur_pile > 6)
+          cur_pile = 6;
+      }
+      redraw = true;
+    } else if (sc == 0x39 || sc == 0x1C) {
+      if (cur_pile == 11) {
+        if (pile_counts[11] > 0) {
+          Card c = piles[11][pile_counts[11] - 1];
+          pile_counts[11]--;
+          c.face_up = true;
+          piles[12][pile_counts[12]] = c;
+          pile_counts[12]++;
+        } else {
+          if (pile_counts[12] > 0) {
+            for (int i = pile_counts[12] - 1; i >= 0; i--) {
+              Card c = piles[12][i];
+              c.face_up = false;
+              piles[11][pile_counts[11]] = c;
+              pile_counts[11]++;
+            }
+            pile_counts[12] = 0;
+          }
+        }
+        if (src_pile == 11)
+          src_pile = -1;
+        redraw = true;
+      } else {
+        if (src_pile == -1) {
+          if (pile_counts[cur_pile] > 0) {
+            src_pile = cur_pile;
+            redraw = true;
+          }
+        } else {
+          if (src_pile == cur_pile) {
+            src_pile = -1;
+            redraw = true;
+          } else {
+            Card src = piles[src_pile][pile_counts[src_pile] - 1];
+            bool valid = false;
+
+            if (cur_pile >= 7 && cur_pile <= 10) {
+              if (pile_counts[cur_pile] == 0) {
+                if (src.rank == 0)
+                  valid = true;
+              } else {
+                Card top = piles[cur_pile][pile_counts[cur_pile] - 1];
+                if (top.suit == src.suit && src.rank == top.rank + 1)
+                  valid = true;
+              }
+            } else if (cur_pile < 7) {
+              if (pile_counts[cur_pile] == 0) {
+                if (src.rank == 12)
+                  valid = true;
+              } else {
+                Card top = piles[cur_pile][pile_counts[cur_pile] - 1];
+                bool src_red = (src.suit < 2);
+                bool top_red = (top.suit < 2);
+                if (src_red != top_red && src.rank == top.rank - 1)
+                  valid = true;
+              }
+            }
+
+            if (valid) {
+              piles[cur_pile][pile_counts[cur_pile]++] = src;
+              pile_counts[src_pile]--;
+              if (src_pile < 7 && pile_counts[src_pile] > 0) {
+                piles[src_pile][pile_counts[src_pile] - 1].face_up = true;
+              }
+              src_pile = -1;
+              redraw = true;
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// ============================================================================
 // HAUPTMENÜ
 // ============================================================================
 
 void main_menu() {
   clear_screen(0x03);
 
+  int win_height = 20;
+  int win_width = 40;
+  int win_y = 3;
+  int win_x = 20;
+
   for (int i = 0; i < 80; i++)
     print_char(0, i, ' ', 0x1F);
-  print_string(0, 2, "Milla OS 0.6 - Start Menu", 0x1E);
+  print_string(0, 2, "Milla OS 1.0 - Start Menu", 0x1E);
 
-  draw_window(5, 25, 15, 30, " Menu ", 0x0B); // Höhe angepasst
+  draw_window(win_y, win_x, win_height, win_width, " Main Menu ", 0x0B);
 
   // **GEÄNDERT: Menüpunkte**
-  const char *menu_items[] = {"1. File Manager", "2. Text Editor",
-                              "3. Calculator",   "4. Internet Browser",
-                              "5. Settings",     "6. Exit to MTop"};
+  const char *menu_items[] = {
+      "1. File Manager",     "2. Doc Writer", "3. Calculator",
+      "4. Internet Browser", "5. Milla Lang", "6. Milla IDE",
+      "7. Solitaire",        "8. Settings",   "9. Exit to MTop"};
+
+  const int NUM_ITEMS = 9;
 
   int selected = 0;
   bool running = true;
 
   while (running) {
     // Menü neu zeichnen (wichtig nach get_string_input)
-    draw_window(5, 25, 15, 30, " Menu ", 0x0B);
-    for (int i = 0; i < 6; i++) {
-      uint16_t color = (i == selected) ? 0x07 : 0x70;
-      print_string(7 + i * 2, 28, "                        ", color);
-      print_string(7 + i * 2, 28, menu_items[i], color);
+    draw_window(win_y, win_x, win_height, win_width, " Main Menu ", 0x0B);
+
+    // Draw Background
+    for (int r = win_y + 1; r < win_y + win_height - 1; r++) {
+      for (int c = win_x + 1; c < win_x + win_width - 1; c++)
+        print_char(r, c, ' ', 0x0F);
+    }
+
+    for (int i = 0; i < NUM_ITEMS; i++) {
+      int item_y = win_y + 2 + (i * 2);
+      uint16_t color = (i == selected) ? 0x4E : 0x0F;
+      if (i == selected) {
+        for (int k = 0; k < win_width - 2; k++)
+          print_char(item_y, win_x + 1 + k, ' ', 0x4F);
+      }
+      print_string(item_y, win_x + 3, menu_items[i], color);
     }
 
     for (int i = 0; i < 80; i++)
@@ -2664,61 +4064,91 @@ void main_menu() {
       running = false;
     } else if (scancode == 0x48 && selected > 0) {
       selected--;
-    } else if (scancode == 0x50 && selected < 5) {
+    } else if (scancode == 0x50 && selected < NUM_ITEMS - 1) {
       selected++;
     } else if (scancode == 0x1C) {
       switch (selected) {
       case 0:
         file_manager();
         break;
-      case 1: // NEUE EDITOR-LOGIK
+      case 1: // DOC EDITOR / TEXT Editor
       {
+        // Ask filename etc.
         char filename_buffer[MAX_FILENAME + 1];
         memset(filename_buffer, 0, sizeof(filename_buffer));
-
-        // Rufe Eingabefunktion auf (überlagert Menü temporär)
         get_string_input(10, 20, 40, " Enter Filename ", filename_buffer,
                          MAX_FILENAME);
+        if (string_length(filename_buffer) == 0)
+          string_copy(filename_buffer, "NEW.MD");
 
-        if (string_length(filename_buffer) == 0) {
-          string_copy(filename_buffer, "UNTITLED.TXT");
-        } else {
-          // Füge .TXT hinzu, wenn keine Erweiterung vorhanden ist
-          const char *ext = get_filename_ext(filename_buffer);
-          if (string_length(ext) == 0) {
-            int len = string_length(filename_buffer);
-            if (len < MAX_FILENAME - 4) { // Platz für ".TXT"
-              filename_buffer[len] = '.';
-              filename_buffer[len + 1] = 'T';
-              filename_buffer[len + 2] = 'X';
-              filename_buffer[len + 3] = 'T';
-              filename_buffer[len + 4] = '\0';
-            }
+        // Auto extension
+        // If not .MC and not .TXT, assume .MD for this menu item?
+        // Let's just launch doc_editor
+        const char *ext = get_filename_ext(filename_buffer);
+        if (string_length(ext) == 0) {
+          // Append .MD by default for Doc Writer
+          int len = string_length(filename_buffer);
+          if (len < MAX_FILENAME - 3) {
+            filename_buffer[len] = '.';
+            filename_buffer[len + 1] = 'M';
+            filename_buffer[len + 2] = 'D';
+            filename_buffer[len + 3] = '\0';
           }
         }
-        text_editor(filename_buffer);
+
+        doc_editor(filename_buffer);
       } break;
       case 2:
         calculator();
         break;
-
       case 3:
         browser();
         break;
       case 4:
-        settings();
+        milla_lang();
         break;
       case 5:
+        // IDE Launch from menu (already handled above in full logic but
+        // previous chunk missed case 5 label in this snippet) Wait, I need to
+        // match properly.
+        {
+          char filename_buffer[MAX_FILENAME + 1];
+          memset(filename_buffer, 0, sizeof(filename_buffer));
+          get_string_input(10, 20, 40, " Enter MC File ", filename_buffer,
+                           MAX_FILENAME);
+          if (string_length(filename_buffer) == 0)
+            string_copy(filename_buffer, "SCRIPT.MC");
+
+          const char *ext = get_filename_ext(filename_buffer);
+          if (string_length(ext) == 0) {
+            int len = string_length(filename_buffer);
+            if (len < MAX_FILENAME - 3) {
+              filename_buffer[len] = '.';
+              filename_buffer[len + 1] = 'M';
+              filename_buffer[len + 2] = 'C';
+              filename_buffer[len + 3] = '\0';
+            }
+          }
+          milla_ide(filename_buffer);
+        }
+        break;
+      case 6:
+        solitaire();
+        break;
+      case 7:
+        settings();
+        break;
+      case 8:
         running = false;
         break;
       }
-      // Zeichne Menü-Hintergrund neu, falls von App überschrieben
+
       clear_screen(0x03);
       for (int i = 0; i < 80; i++)
         print_char(0, i, ' ', 0x1F);
-      print_string(0, 2, "Milla OS 0.6 - Start Menu", 0x1E);
+      print_string(0, 2, "Milla OS 1.0 - Start Menu", 0x1E);
+      draw_window(win_y, win_x, win_height, win_width, " Main Menu ", 0x0B);
     }
-    // Force redraw on loop
   }
 }
 
@@ -2828,7 +4258,7 @@ void MTop() {
       clear_screen(0x03);
       for (int i = 0; i < 80; i++)
         print_char(0, i, ' ', 0x1F);
-      print_string(0, 2, "Milla OS 0.6", 0x1E);
+      print_string(0, 2, "Milla OS 1.0", 0x1E);
       print_string(0, 60, "[F1=MENU]", 0x4F);
       draw_window(3, 10, 12, 60, " Welcome ", 0x0B);
       print_string(5, 15, "Welcome to Milla OS!", 0x70);
@@ -2883,5 +4313,3 @@ extern "C" void kernel_main() {
   Network::init();
   MTop();
 }
-
-// ***ENDE CODE***
