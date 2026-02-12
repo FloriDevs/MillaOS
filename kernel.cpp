@@ -2036,45 +2036,6 @@ uint8_t get_keyboard_input() {
 // SETTINGS
 // ============================================================================
 
-void settings() {
-  bool running = true;
-  int selected = 0;
-
-  while (running) {
-    draw_window(8, 20, 10, 40, " Settings ", 0x0D);
-    print_string(10, 22, "1. Toggle Wallpaper", selected == 0 ? 0x0F : 0x07);
-
-    if (show_wallpaper)
-      print_string(10, 50, "[ON] ", 0x0A);
-    else
-      print_string(10, 50, "[OFF]", 0x0C);
-
-    print_string(12, 22, "2. Exit", selected == 1 ? 0x0F : 0x07);
-
-    // MOUSE CURSOR
-    print_char(mouse_y, mouse_x, 219, 0x0E); // Draw Cursor
-
-    uint8_t sc = get_keyboard_input();
-    print_char(mouse_y, mouse_x, ' ',
-               0x0D); // Erase Cursor (assuming window bg)
-
-    if (sc == 0)
-      continue;
-
-    if (sc == 0x01)
-      running = false;
-    else if (sc == 0x1C) {
-      if (selected == 0) {
-        show_wallpaper = !show_wallpaper;
-      } else {
-        running = false;
-      }
-    } else if (sc == 0x48 || sc == 0x50) {
-      selected = !selected;
-    }
-  }
-}
-
 // Tastaturlayouts
 // Tastaturlayouts
 const char scancode_map_us[] = {
@@ -4313,3 +4274,5 @@ extern "C" void kernel_main() {
   Network::init();
   MTop();
 }
+
+// ***ENDE CODE***
