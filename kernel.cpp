@@ -4122,7 +4122,7 @@ void MTop() {
 
   for (int i = 0; i < 80; i++)
     print_char(0, i, ' ', 0x1F);
-  print_string(0, 2, "Milla OS 0.6", 0x1E);
+  print_string(0, 2, "Milla OS 1.0", 0x1E);
   print_string(0, 60, "[F1=STARTMENU]", 0x4F);
 
   // WIDGET: Clock
