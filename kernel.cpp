@@ -1283,9 +1283,9 @@ ATADevice *active_disk = nullptr; // Zeigt auf die RAM-Disk
 const size_t RAMDISK_SIZE_BYTES = 800 * 1024; // 800KB
 const size_t RAMDISK_SIZE_SECTORS = RAMDISK_SIZE_BYTES / 512;
 uint8_t *ramdisk_storage = nullptr; // Zeiger auf den Speicher der RAM-Disk
-ATADevice ramdisk_device;           // Ein virtuelles ATADevice für die RAM-Disk
-#define RAMDISK_MAGIC_IO 0xDEAD     // Eindeutige ID statt I/O-Port
-#define SECTOR_SIZE 512             // Definiert hier, da es global genutzt wird
+ATADevice ramdisk_device;       // Ein virtuelles ATADevice für die RAM-Disk
+#define RAMDISK_MAGIC_IO 0xDEAD // Eindeutige ID statt I/O-Port
+#define SECTOR_SIZE 512         // Definiert hier, da es global genutzt wird
 // +++ ENDE RAM-DISK IMPLEMENTIERUNG +++
 
 // ============================================================================
@@ -1429,6 +1429,25 @@ bool ata_write_sector(ATADevice *dev, uint32_t lba, const uint8_t *buffer) {
 #define MAX_FILES 64
 #define MAX_FILENAME 12
 
+struct PartitionEntry {
+  uint8_t bootable;
+  uint8_t start_head;
+  uint8_t start_sect_cyl;
+  uint8_t start_cyl_low;
+  uint8_t system_id;
+  uint8_t end_head;
+  uint8_t end_sect_cyl;
+  uint8_t end_cyl_low;
+  uint32_t start_lba;
+  uint32_t total_sectors;
+} __attribute__((packed));
+
+struct MBR {
+  uint8_t bootstrap[446];
+  PartitionEntry partitions[4];
+  uint16_t signature;
+} __attribute__((packed));
+
 struct BootSector {
   uint8_t jump[3];
   char oem[8];
@@ -1482,6 +1501,9 @@ BootSector boot_sector;
 uint8_t sector_buffer[SECTOR_SIZE];
 bool fs_mounted = false;
 
+uint32_t active_partition_lba = 0;
+uint32_t active_partition_sectors = 0;
+
 uint32_t fat_begin_lba = 0;
 uint32_t cluster_begin_lba = 0;
 uint32_t sectors_per_cluster = 0;
@@ -1489,7 +1511,7 @@ uint32_t root_dir_lba = 0;
 uint32_t root_dir_sectors = 0;
 uint32_t root_dir_first_cluster = 0;
 
-bool format_fat16(ATADevice *dev) {
+bool format_fat16(ATADevice *dev, uint32_t offset, uint32_t size_sectors) {
   if (!dev->present)
     return false;
 
@@ -1509,10 +1531,10 @@ bool format_fat16(ATADevice *dev) {
   boot_sector.media_type = 0xF8;
   boot_sector.sectors_per_track = 63;
   boot_sector.head_count = 255;
-  boot_sector.hidden_sectors = 0;
+  boot_sector.hidden_sectors = offset;
 
   // Setze Sektorgrößen
-  uint32_t total_sectors = dev->size_sectors;
+  uint32_t total_sectors = size_sectors;
   if (total_sectors < 0x10000) {
     boot_sector.total_sectors_16 = (uint16_t)total_sectors;
     boot_sector.total_sectors_32 = 0;
@@ -1548,7 +1570,7 @@ bool format_fat16(ATADevice *dev) {
   sector_buffer[510] = 0x55;
   sector_buffer[511] = 0xAA;
 
-  if (!ata_write_sector(dev, 0, sector_buffer))
+  if (!ata_write_sector(dev, offset, sector_buffer))
     return false;
 
   // Initialisiere FAT (beide Kopien)
@@ -1556,7 +1578,7 @@ bool format_fat16(ATADevice *dev) {
   ((uint16_t *)sector_buffer)[0] = 0xFFF8;
   ((uint16_t *)sector_buffer)[1] = 0xFFFF;
 
-  uint32_t fat1_lba = boot_sector.reserved_sectors;
+  uint32_t fat1_lba = offset + boot_sector.reserved_sectors;
   uint32_t fat2_lba = fat1_lba + boot_sector.sectors_per_fat_16;
 
   if (!ata_write_sector(dev, fat1_lba, sector_buffer))
@@ -1571,7 +1593,7 @@ bool format_fat16(ATADevice *dev) {
     ata_write_sector(dev, fat2_lba + i, sector_buffer);
   }
 
-  // Initialisiere Root Directory (fester Ort bei FAT16)
+  // Initialisiere Root Directory
   uint32_t root_lba =
       fat1_lba + (boot_sector.fat_count * boot_sector.sectors_per_fat_16);
 
@@ -1584,11 +1606,27 @@ bool format_fat16(ATADevice *dev) {
   return true;
 }
 
-bool mount_fat16(ATADevice *dev) {
+bool format_mbr(ATADevice *dev) {
+  if (!dev->present)
+    return false;
+  memset(sector_buffer, 0, SECTOR_SIZE);
+  MBR *mbr = (MBR *)sector_buffer;
+  mbr->signature = 0xAA55;
+
+  // Create one large partition
+  mbr->partitions[0].bootable = 0x80;
+  mbr->partitions[0].system_id = 0x06; // FAT16
+  mbr->partitions[0].start_lba = 63;   // Standard offset
+  mbr->partitions[0].total_sectors = dev->size_sectors - 63;
+
+  return ata_write_sector(dev, 0, sector_buffer);
+}
+
+bool mount_fat16(ATADevice *dev, uint32_t offset) {
   if (!dev->present)
     return false;
 
-  if (!ata_read_sector(dev, 0, sector_buffer))
+  if (!ata_read_sector(dev, offset, sector_buffer))
     return false;
 
   // Überprüfe die Magische Zahl
@@ -1602,7 +1640,7 @@ bool mount_fat16(ATADevice *dev) {
   if (boot_sector.fat_count == 0)
     return false;
 
-  fat_begin_lba = boot_sector.reserved_sectors;
+  fat_begin_lba = offset + boot_sector.reserved_sectors;
 
   // Berechne Positionen für FAT16
   root_dir_sectors = (boot_sector.root_entry_count * sizeof(DirEntry) +
@@ -1614,6 +1652,8 @@ bool mount_fat16(ATADevice *dev) {
 
   sectors_per_cluster = boot_sector.sectors_per_cluster;
   root_dir_first_cluster = 0;
+
+  active_partition_lba = offset;
 
   fs_mounted = true;
   return true;
@@ -1948,18 +1988,46 @@ void init_filesystem() {
     print_string(22, 45, "No HDD Found", 0x0C);
   }
 
-  // Mount RAM Disk by default
+  // Mount logic
   if (active_disk) {
-    if (!mount_fat16(active_disk)) {
-      // Formatiere wenn Mount fehlschlägt
-      print_string(23, 10, "Formatting RAM disk...    ", 0x0E);
-      if (format_fat16(active_disk)) {
-        mount_fat16(active_disk);
-        print_string(23, 10, "Format complete.          ", 0x0A);
-      } else {
-        print_string(23, 10, "Format failed!            ", 0x0C);
+    if (!mount_fat16(active_disk, 0)) {
+      // Only format RAM disk automatically
+      if (active_disk == &ramdisk_device) {
+        print_string(23, 10, "Formatting RAM disk...    ", 0x0E);
+        if (format_fat16(active_disk, 0, active_disk->size_sectors)) {
+          mount_fat16(active_disk, 0);
+          print_string(23, 10, "Format complete.          ", 0x0A);
+        } else {
+          print_string(23, 10, "Format failed!            ", 0x0C);
+        }
       }
     }
+  }
+
+  // AUTO-MOUNT HDD if FAT exists
+  if (hdd_device.present) {
+    if (ata_read_sector(&hdd_device, 0, sector_buffer)) {
+      if (sector_buffer[510] == 0x55 && sector_buffer[511] == 0xAA) {
+        MBR *mbr = (MBR *)sector_buffer;
+        for (int i = 0; i < 4; i++) {
+          if (mbr->partitions[i].total_sectors > 0) {
+            if (mount_fat16(&hdd_device, mbr->partitions[i].start_lba)) {
+              active_disk = &hdd_device; // Prefer HDD if FAT exists
+              print_string(23, 45, "HDD Partition Mounted    ", 0x0A);
+              break;
+            }
+          }
+        }
+        // Also check LBA 0 for superfloppy
+        if (!fs_mounted && mount_fat16(&hdd_device, 0)) {
+          active_disk = &hdd_device;
+          print_string(23, 45, "HDD Superfloppy Mounted  ", 0x0A);
+        }
+      }
+    }
+  }
+
+  if (fs_mounted) {
     read_directory(active_disk, root_dir_first_cluster);
   }
   delay(1); // Kurze Pause
@@ -2079,6 +2147,8 @@ char scancode_to_ascii(uint8_t scancode, bool shift) {
 void milla_ide(const char *filename);
 void doc_editor(const char *filename);
 void text_editor(const char *filename);
+void get_string_input(int row, int col, int width, const char *prompt,
+                      char *buffer, int max_len);
 
 // ============================================================================
 // SIMULIERTER C++ PROGRAMM-LADER
@@ -2221,14 +2291,23 @@ void file_manager() {
       if (active_disk == &ramdisk_device && hdd_device.present) {
         active_disk = &hdd_device;
         // Auto-mount if needed
-        if (!mount_fat16(active_disk)) {
-          // DON'T FORMAT HDD AUTOMATICALLY! Just warn.
-          // But wait, user wants create.sh to format it. So it should be
-          // mounted. If create.sh failed or wasn't run, this might fail.
+        if (!mount_fat16(active_disk, 0)) {
+          // Try MBR partitions
+          if (ata_read_sector(active_disk, 0, sector_buffer)) {
+            if (sector_buffer[510] == 0x55 && sector_buffer[511] == 0xAA) {
+              MBR *mbr = (MBR *)sector_buffer;
+              for (int i = 0; i < 4; i++) {
+                if (mbr->partitions[i].total_sectors > 0) {
+                  if (mount_fat16(active_disk, mbr->partitions[i].start_lba))
+                    break;
+                }
+              }
+            }
+          }
         }
       } else if (active_disk == &hdd_device) {
         active_disk = &ramdisk_device;
-        mount_fat16(active_disk); // Re-mount RAM disk just in case
+        mount_fat16(active_disk, 0); // Re-mount RAM disk just in case
       }
       // Reload Dir
       if (active_disk)
@@ -2722,16 +2801,140 @@ void network_status_page() {
   }
 }
 
-// Solitaire helpers
-void solitaire_draw_cursor() {
-  print_char(mouse_y, mouse_x, (char)219, 0x0E); // Cursor
-}
+void disk_management() {
+  bool running = true;
+  int selected_dev = 0; // 0=RAM, 1=HDD
+  while (running) {
+    if (show_wallpaper)
+      draw_wallpaper();
+    else
+      clear_screen(0x03);
 
-bool check_mouse_click() {
-  static bool old_left = false;
-  bool clicked = (mouse_left && !old_left);
-  old_left = mouse_left;
-  return clicked;
+    draw_window(5, 5, 18, 70, " Disk Management ", 0x0B);
+    print_string(7, 8, "Select Device:", 0x70);
+
+    uint16_t col0 = (selected_dev == 0) ? 0x0F : 0x07;
+    uint16_t col1 = (selected_dev == 1) ? 0x0F : 0x07;
+    print_string(9, 10, "1. RAM DISK (MRD0)", col0);
+    print_string(11, 10, "2. HARD DISK (HDD0)", col1);
+
+    ATADevice *dev = (selected_dev == 0) ? &ramdisk_device : &hdd_device;
+    if (dev->present) {
+      print_string(9, 40, "Status: Present ", 0x0A);
+      // Scan for partitions
+      if (ata_read_sector(dev, 0, sector_buffer)) {
+        if (sector_buffer[510] == 0x55 && sector_buffer[511] == 0xAA) {
+          MBR *mbr = (MBR *)sector_buffer;
+          char p_str[30] = "P1: None";
+          if (mbr->partitions[0].system_id != 0) {
+            string_copy(p_str, "P1: FAT16 (");
+            int pos = 11;
+            uint32_t size_mb =
+                (mbr->partitions[0].total_sectors * 512) / (1024 * 1024);
+            if (size_mb == 0)
+              p_str[pos++] = '0';
+            else {
+              if (size_mb >= 100)
+                p_str[pos++] = '0' + (size_mb / 100) % 10;
+              if (size_mb >= 10)
+                p_str[pos++] = '0' + (size_mb / 10) % 10;
+              p_str[pos++] = '0' + (size_mb % 10);
+            }
+            string_copy(p_str + pos, "MB)");
+            print_string(11, 40, p_str, 0x0A);
+          } else {
+            if (sector_buffer[54] == 'F' && sector_buffer[55] == 'A')
+              print_string(11, 40, "MBR: Superfloppy", 0x0E);
+            else
+              print_string(11, 40, "MBR: Empty/Raw  ", 0x07);
+          }
+        }
+      }
+    } else {
+      print_string(9, 40, "Status: Missing ", 0x0C);
+    }
+
+    print_string(15, 8, "Actions: [F1] Format MBR  [F2] Format FAT  [F3] Mount",
+                 0x70);
+    print_string(16, 8, "         [F4] Use Empty Partition", 0x70);
+    print_string(21, 8, "ESC: Back", 0x70);
+
+    // Render mouse
+    print_char(mouse_y, mouse_x, (char)219, 0x0E);
+
+    uint8_t sc = get_keyboard_input();
+    if (sc == 0x01)
+      running = false;
+    else if (sc == 0x48 || sc == 0x50)
+      selected_dev = 1 - selected_dev;
+    else if (sc == 0x3B) { // F1
+      if (format_mbr(dev)) {
+        print_string(18, 8, "MBR Formatted successfully!   ", 0x0A);
+        delay(10);
+      }
+    } else if (sc == 0x3C) { // F2
+      uint32_t offset = 0;
+      uint32_t size = dev->size_sectors;
+      ata_read_sector(dev, 0, sector_buffer);
+      MBR *mbr = (MBR *)sector_buffer;
+      if (mbr->partitions[0].system_id != 0) {
+        offset = mbr->partitions[0].start_lba;
+        size = mbr->partitions[0].total_sectors;
+      }
+      if (format_fat16(dev, offset, size)) {
+        print_string(18, 8, "FAT16 Formatted successfully! ", 0x0A);
+        delay(10);
+        if (mount_fat16(dev, offset)) {
+          active_disk = dev;
+          read_directory(active_disk, root_dir_first_cluster);
+        }
+      }
+    } else if (sc == 0x3D) { // F3
+      uint32_t offset = 0;
+      ata_read_sector(dev, 0, sector_buffer);
+      MBR *mbr = (MBR *)sector_buffer;
+      if (mbr->partitions[0].system_id != 0)
+        offset = mbr->partitions[0].start_lba;
+      if (mount_fat16(dev, offset)) {
+        active_disk = dev;
+        read_directory(active_disk, root_dir_first_cluster);
+        print_string(18, 8, "Mounted successfully!         ", 0x0A);
+        delay(10);
+      } else {
+        print_string(18, 8, "Mount failed! No FAT found.   ", 0x0C);
+        delay(10);
+      }
+    } else if (sc == 0x3E) { // F4 - Use Empty
+      ata_read_sector(dev, 0, sector_buffer);
+      MBR *mbr = (MBR *)sector_buffer;
+      bool found = false;
+      for (int i = 0; i < 4; i++) {
+        if (mbr->partitions[i].total_sectors > 0) {
+          if (!mount_fat16(dev, mbr->partitions[i].start_lba)) {
+            if (format_fat16(dev, mbr->partitions[i].start_lba,
+                             mbr->partitions[i].total_sectors)) {
+              print_string(18, 8, "Formatted empty partition!    ", 0x0E);
+              mount_fat16(dev, mbr->partitions[i].start_lba);
+              active_disk = dev;
+              found = true;
+              delay(10);
+              break;
+            }
+          } else {
+            active_disk = dev;
+            found = true;
+            print_string(18, 8, "Found and used existing FAT!  ", 0x0A);
+            delay(10);
+            break;
+          }
+        }
+      }
+      if (!found) {
+        print_string(18, 8, "No usable partition found!    ", 0x0C);
+        delay(10);
+      }
+    }
+  }
 }
 
 void settings() {
@@ -2749,13 +2952,13 @@ void settings() {
     }
 
     // Draw Window
-    draw_window(5, 20, 16, 40, " Settings ", 0x0D);
+    draw_window(5, 20, 18, 40, " Settings ", 0x0D);
 
     const char *opts[] = {"1. Toggle Wallpaper", "2. Keyboard Layout",
-                          "3. Network Status", "4. Exit"};
+                          "3. Network Status", "4. Disk Management", "5. Exit"};
 
     // Draw Options
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 5; i++) {
       uint16_t col = (selected == i) ? 0x0F : 0x07;
       print_string(8 + i * 2, 22, opts[i], col);
 
@@ -2775,6 +2978,11 @@ void settings() {
           print_string(12, 50, "[OK]", 0x0A);
         else
           print_string(12, 50, "[NO]", 0x0C);
+      } else if (i == 3) {
+        if (active_disk == &ramdisk_device)
+          print_string(14, 50, "[RAM]", 0x0E);
+        else if (active_disk == &hdd_device)
+          print_string(14, 50, "[HDD]", 0x0E);
       }
     }
 
@@ -2782,10 +2990,6 @@ void settings() {
     print_char(mouse_y, mouse_x, (char)219, 0x0E);
 
     uint8_t sc = get_keyboard_input();
-
-    // Erase Cursor (if moved)
-    // Actually, loop redraws everything so erasing specifically is redundant
-    // but safe if partial redraw
 
     if (sc == 0)
       continue;
@@ -2807,13 +3011,7 @@ void settings() {
         // Network Info Popup
         draw_window(8, 15, 12, 50, " Network Info ", 0x09);
         print_string(10, 18, "MAC: ", 0x0F);
-        // print_string(10, 23, Network::get_mac_address_str(), 0x0F); // Helper
-        // missing sometimes
         char mac_buf[20];
-        // Re-implement simplified MAC str if needed or use existing
-        // Assuming existing helper is available or we skip detailed MAC for
-        // now.
-
         if (Network::connected)
           print_string(12, 18, "Status: Connected", 0x0A);
         else
@@ -2822,13 +3020,15 @@ void settings() {
         print_string(16, 18, "Press any key...", 0x07);
         get_keyboard_input();
       } else if (selected == 3) {
+        disk_management();
+      } else if (selected == 4) {
         running = false;
       }
     } else if (sc == 0x48) { // Up
       if (selected > 0)
         selected--;
     } else if (sc == 0x50) { // Down
-      if (selected < 3)
+      if (selected < 4)
         selected++;
     }
   }
