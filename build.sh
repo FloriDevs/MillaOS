@@ -55,7 +55,7 @@ fi
 
 # 2. Kernel verknüpfen
 echo "2. Verknüpfe den Kernel mit linker.ld..."
-ld -m elf_i386 -T linker.ld -o kernel.bin boot.o kernel.o shell.o fds.o edit.o folder.o calc.o off.o logo1.o logo2.o files.o calcu.o
+ld -m elf_i386 -T linker.ld -o kernel.bin boot.o kernel.o shell.o fds.o logo1.o logo2.o
 if [ $? -ne 0 ]; then
     echo "Fehler beim Verknüpfen des Kernels."
     exit 1
