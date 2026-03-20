@@ -49,113 +49,16 @@ struct multiboot_header {
   uint32_t magic;
   uint32_t flags;
   uint32_t checksum;
-  // Padding/Address fields (must be present to reach offset 32 for graphics
-  // fields)
-  uint32_t header_addr;
-  uint32_t load_addr;
-  uint32_t load_end_addr;
-  uint32_t bss_end_addr;
-  uint32_t entry_addr;
-  // Graphics fields (Offset 32)
-  uint32_t mode_type;
-  uint32_t width;
-  uint32_t height;
-  uint32_t depth;
 };
 
 const uint32_t MULTIBOOT_MAGIC = 0x1BADB002;
-// Flags: Modules aligned (1), Mem info (2), Graphics mode (4)
-const uint32_t MULTIBOOT_FLAGS = 0x00000007;
+const uint32_t MULTIBOOT_FLAGS = 0x00000003;
 const uint32_t MULTIBOOT_CHECKSUM = -(MULTIBOOT_MAGIC + MULTIBOOT_FLAGS);
 
 __attribute__((section(".multiboot_header"))) struct multiboot_header header = {
     .magic = MULTIBOOT_MAGIC,
     .flags = MULTIBOOT_FLAGS,
-    .checksum = MULTIBOOT_CHECKSUM,
-    .header_addr = 0,
-    .load_addr = 0,
-    .load_end_addr = 0,
-    .bss_end_addr = 0,
-    .entry_addr = 0,
-    .mode_type = 0, // 0 = linear graphics mode
-    .width = 800,
-    .height = 600,
-    .depth = 32};
-
-// VBE Info Structures
-struct vbe_mode_info {
-  uint16_t attributes;
-  uint8_t win_a, win_b;
-  uint16_t granularity;
-  uint16_t winsize;
-  uint16_t segment_a, segment_b;
-  uint32_t win_funcptr;
-  uint16_t bytes_per_scanline;
-  uint16_t x_res, y_res;
-  uint8_t x_charsize, y_charsize, planes, bpp, banks;
-  uint8_t memory_model, bank_size, image_pages, reserved0;
-  uint8_t red_mask, red_position;
-  uint8_t green_mask, green_position;
-  uint8_t blue_mask, blue_position;
-  uint8_t reserved_mask, reserved_position;
-  uint8_t direct_color_attributes;
-  uint32_t framebuffer;
-  uint32_t off_screen_mem_off;
-  uint16_t off_screen_mem_size;
-  uint8_t reserved1[206];
-} __attribute__((packed));
-
-struct multiboot_info {
-  uint32_t flags;
-  uint32_t mem_lower;
-  uint32_t mem_upper;
-  uint32_t boot_device;
-  uint32_t cmdline;
-  uint32_t mods_count;
-  uint32_t mods_addr;
-  uint32_t syms[4];
-  uint32_t mmap_length;
-  uint32_t mmap_addr;
-  uint32_t drives_length;
-  uint32_t drives_addr;
-  uint32_t config_table;
-  uint32_t boot_loader_name;
-  uint32_t apm_table;
-  uint32_t vbe_control_info;
-  uint32_t vbe_mode_info;
-  uint16_t vbe_mode;
-  uint16_t vbe_interface_seg;
-  uint16_t vbe_interface_off;
-  uint16_t vbe_interface_len;
-
-  // Framebuffer info (Bit 12)
-  uint64_t framebuffer_addr;
-  uint32_t framebuffer_pitch;
-  uint32_t framebuffer_width;
-  uint32_t framebuffer_height;
-  uint8_t framebuffer_bpp;
-  uint8_t framebuffer_type;
-  uint8_t color_info[6];
-} __attribute__((packed));
-
-struct Graphics {
-  uint32_t *framebuffer;
-  uint32_t width;
-  uint32_t height;
-  uint32_t pitch;
-  bool active;
-} screen;
-
-extern "C" void put_pixel(int x, int y, uint32_t color) {
-  if (!screen.active || x < 0 || (uint32_t)x >= screen.width || y < 0 ||
-      (uint32_t)y >= screen.height)
-    return;
-  screen.framebuffer[y * (screen.pitch / 4) + x] = color;
-}
-
-uint32_t system_ram_mb = 0;
-
-extern "C" uint32_t get_total_ram_mb() { return system_ram_mb; }
+    .checksum = MULTIBOOT_CHECKSUM};
 
 // ============================================================================
 // I/O PORT FUNKTIONEN
@@ -342,29 +245,18 @@ void handle_mouse_byte(uint8_t b) {
     mouse_x += dx / 2; // Sensitivity div 2
     mouse_y -= dy / 2; // Invert Y
 
-    if (screen.active) {
-      if (mouse_x < 0)
-        mouse_x = 0;
-      if ((uint32_t)mouse_x > screen.width - 1)
-        mouse_x = screen.width - 1;
-      if (mouse_y < 0)
-        mouse_y = 0;
-      if ((uint32_t)mouse_y > screen.height - 1)
-        mouse_y = screen.height - 1;
-    } else {
-      if (mouse_x < 0)
-        mouse_x = 0;
-      if (mouse_x > 79)
-        mouse_x = 79;
-      if (mouse_y < 0)
-        mouse_y = 0;
-      if (mouse_y > 24)
-        mouse_y = 24;
-    }
+    if (mouse_x < 0)
+      mouse_x = 0;
+    if (mouse_x > 79)
+      mouse_x = 79;
+    if (mouse_y < 0)
+      mouse_y = 0;
+    if (mouse_y > 24)
+      mouse_y = 24;
   }
 }
 
-void draw_wallpaper_text() {
+void draw_wallpaper() {
   clear_screen(0x20); // Green bg
   // Daisy Field Pattern
   for (int y = 0; y < 25; y++) {
@@ -2193,20 +2085,6 @@ void draw_flower() {
 }
 
 // Modified to handle mouse internally
-extern "C" uint8_t get_keyboard_input_nonblock() {
-  uint8_t status = inb(0x64);
-  if (status & 0x01) {
-    uint8_t data = inb(0x60);
-    if (status & 0x20) {
-      handle_mouse_byte(data);
-      return 0;
-    } else {
-      return data;
-    }
-  }
-  return 0;
-}
-
 uint8_t get_keyboard_input() {
   while (true) {
     uint8_t status = inb(0x64);
@@ -2214,7 +2092,7 @@ uint8_t get_keyboard_input() {
       uint8_t data = inb(0x60);
       if (status & 0x20) {
         handle_mouse_byte(data);
-        return 0;
+        return 0; // Return 0 for mouse update
       } else {
         return data;
       }
@@ -2269,40 +2147,8 @@ char scancode_to_ascii(uint8_t scancode, bool shift) {
 void milla_ide(const char *filename);
 void doc_editor(const char *filename);
 void text_editor(const char *filename);
-extern "C" void start_graphical_shell();
-
-// ============================================================================
-// SHELL FILESYSTEM WRAPPERS (extern C for shell.cpp)
-// ============================================================================
-extern "C" int get_shell_file_count() { return file_count; }
-
-extern "C" void get_shell_file_name(int index, char *out) {
-  if (index >= 0 && index < file_count) {
-    string_copy(out, file_cache[index].name);
-  } else {
-    out[0] = '\0';
-  }
-}
-
-extern "C" uint32_t get_shell_file_size(int index) {
-  if (index >= 0 && index < file_count)
-    return file_cache[index].size;
-  return 0;
-}
-
-extern "C" bool get_shell_file_is_dir(int index) {
-  if (index >= 0 && index < file_count)
-    return file_cache[index].is_directory;
-  return false;
-}
-
-extern "C" void shell_refresh_files() {
-  if (fs_mounted && active_disk) {
-    read_directory(active_disk, root_dir_first_cluster);
-  }
-}
-
-extern "C" bool shell_is_fs_mounted() { return fs_mounted; }
+void get_string_input(int row, int col, int width, const char *prompt,
+                      char *buffer, int max_len);
 
 // ============================================================================
 // SIMULIERTER C++ PROGRAMM-LADER
@@ -2960,7 +2806,7 @@ void disk_management() {
   int selected_dev = 0; // 0=RAM, 1=HDD
   while (running) {
     if (show_wallpaper)
-      draw_wallpaper_text();
+      draw_wallpaper();
     else
       clear_screen(0x03);
 
@@ -3100,7 +2946,7 @@ void settings() {
     // Redraw Background
     if (show_wallpaper) {
       // Redraw underlying if transparent...
-      draw_wallpaper_text(); // Simple redraw
+      draw_wallpaper(); // Simple redraw
     } else {
       clear_screen(0x03);
     }
@@ -4622,66 +4468,11 @@ void MTop() {
 // KERNEL MAIN
 // ============================================================================
 
-extern "C" void kernel_main(uint32_t magic, multiboot_info *info) {
-  // Initialize mouse early
-  init_mouse();
-
-  // Initialize graphics if available
-  screen.active = false;
-
-  if (magic == 0x2BADB002) {
-    // Priority 1: Modern Framebuffer Tag (Bit 12)
-    if (info->flags & (1 << 12)) {
-      screen.framebuffer = (uint32_t *)(uintptr_t)info->framebuffer_addr;
-      screen.width = info->framebuffer_width;
-      screen.height = info->framebuffer_height;
-      screen.pitch = info->framebuffer_pitch;
-      screen.active = true;
-    }
-    // Priority 2: VBE Tag (Bit 11)
-    else if (info->flags & (1 << 11)) {
-      vbe_mode_info *vbe = (vbe_mode_info *)(uintptr_t)info->vbe_mode_info;
-      if (vbe->framebuffer != 0) {
-        screen.framebuffer = (uint32_t *)(uintptr_t)vbe->framebuffer;
-        screen.width = vbe->x_res;
-        screen.height = vbe->y_res;
-        screen.pitch = vbe->bytes_per_scanline;
-        screen.active = true;
-      }
-    }
-  }
-
-  // Calculate RAM size from multiboot info
-  if (magic == 0x2BADB002) {
-    if (info->flags & 1) {
-      // mem_upper is KB above 1MB
-      system_ram_mb = (info->mem_upper + 1024) / 1024;
-    }
-  }
-  if (system_ram_mb == 0)
-    system_ram_mb = 128; // Fallback
-
-  if (screen.active) {
-    // We will call the graphical shell here
-    // For now, let's just clear the screen to a modern dark grey
-    for (uint32_t y = 0; y < screen.height; y++) {
-      for (uint32_t x = 0; x < screen.width; x++) {
-        put_pixel(x, y, 0x1A1A1A);
-      }
-    }
-    start_graphical_shell();
-
-    // Fallback if shell returns (or for now since it's not implemented)
-    // draw_flower();
-    // init_filesystem();
-    // Network::init();
-    // MTop();
-  } else {
-    draw_flower();
-    init_filesystem();
-    Network::init();
-    MTop();
-  }
+extern "C" void kernel_main() {
+  draw_flower();
+  init_filesystem();
+  Network::init();
+  MTop();
 }
 
 // ***ENDE CODE***

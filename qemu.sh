@@ -17,7 +17,7 @@ else
     # trap "kill $SERVER_PID" EXIT
 fi
 
-QEMU_ARGS="-cdrom myos.iso -device rtl8139,netdev=n0 -netdev user,id=n0 -boot d -m 128"
+QEMU_ARGS="-cdrom myos.iso -device rtl8139,netdev=n0 -netdev user,id=n0 -boot d -m 128 -vga std -usb -device usb-tablet"
 
 # Check for HDD image
 if [ -f "disk.img" ]; then

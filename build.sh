@@ -26,17 +26,45 @@ echo "--- Starte den Build-Prozess ---"
 
 # 1. Kernel kompilieren
 echo "1. Kompiliere den C++-Kernel (kernel.cpp)..."
+nasm -f elf32 boot.s -o boot.o
 g++ -m32 -ffreestanding -fno-pie -c kernel.cpp -o kernel.o
+g++ -m32 -ffreestanding -fno-pie -c shell.cpp -o shell.o
+g++ -m32 -ffreestanding -fno-pie -c mos-classic.cpp -o kernel-classic.o
+
+# Wallpaper und Icons vorbereiten
+echo "1b. Bereite Medien-Assets vor..."
+convert fds.png -resize 800x600! -depth 8 rgba:fds.raw
+objcopy -I binary -O elf32-i386 -B i386 fds.raw fds.o
+
+# Icons
+for icon in edit folder calc off files calcu; do
+    convert ${icon}.png -depth 8 rgba:${icon}.raw
+    objcopy -I binary -O elf32-i386 -B i386 ${icon}.raw ${icon}.o
+done
+
+# Logos
+for logo in logo1 logo2; do
+    convert ${logo}.png -depth 8 rgba:${logo}.raw
+    objcopy -I binary -O elf32-i386 -B i386 ${logo}.raw ${logo}.o
+done
+
 if [ $? -ne 0 ]; then
-    echo "Fehler beim Kompilieren des Kernels."
+    echo "Fehler beim Vorbereiten der Assets."
     exit 1
 fi
 
 # 2. Kernel verknüpfen
 echo "2. Verknüpfe den Kernel mit linker.ld..."
-ld -m elf_i386 -T linker.ld -o kernel.bin kernel.o
+ld -m elf_i386 -T linker.ld -o kernel.bin boot.o kernel.o shell.o fds.o edit.o folder.o calc.o off.o logo1.o logo2.o files.o calcu.o
 if [ $? -ne 0 ]; then
     echo "Fehler beim Verknüpfen des Kernels."
+    exit 1
+fi
+
+echo "2b. Verknüpfe den Classic-Kernel..."
+ld -m elf_i386 -T linker.ld -o kernel-classic.bin boot.o kernel-classic.o
+if [ $? -ne 0 ]; then
+    echo "Fehler beim Verknüpfen des Classic-Kernels."
     exit 1
 fi
 
@@ -47,6 +75,7 @@ mkdir -p isodir/boot/grub
 # 4. Kernel in das ISO-Verzeichnis kopieren
 echo "4. Kopiere den Kernel in das ISO-Verzeichnis..."
 cp kernel.bin isodir/boot/kernel.bin
+cp kernel-classic.bin isodir/boot/kernel-classic.bin
 
 # 5. GRUB-Konfigurationsdatei in das ISO-Verzeichnis kopieren
 echo "5. Kopiere die GRUB-Konfigurationsdatei..."
@@ -62,9 +91,10 @@ fi
 
 # 7. Aufräumen der temporären Dateien
 echo "7. Lösche temporäre Dateien..."
-rm -r isodir kernel.o kernel.bin
+rm -r isodir kernel.o kernel.bin kernel-classic.o kernel-classic.bin
 
 echo "--- Build-Prozess abgeschlossen! ---"
 echo "Die bootfähige Datei 'myos.iso' wurde erfolgreich erstellt."
 echo "Du kannst diese Datei nun als virtuelles optisches Laufwerk in VirtualBox verwenden."
 
+./qemu.sh
