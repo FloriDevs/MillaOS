@@ -23,6 +23,48 @@ bool get_shell_file_is_dir(int index);
 void shell_refresh_files();
 bool shell_is_fs_mounted();
 void *malloc(uint32_t size);
+char shell_scancode_to_ascii(uint8_t scancode, bool shift);
+void shell_set_language(int lang);
+bool shell_read_file(const char *filename, char *buffer, uint32_t max_size);
+bool shell_write_file(const char *filename, const char *data, uint32_t size);
+bool shell_format_disk(int disk_id);
+bool shell_mount_disk(int disk_id);
+void shell_unmount_disk();
+int shell_get_active_disk();
+bool shell_is_hdd_present();
+}
+
+bool string_starts_with(const char *str, const char *prefix) {
+  while (*prefix)
+    if (*str++ != *prefix++)
+      return false;
+  return true;
+}
+
+void itoa_light(int n, char *s) {
+  if (n == 0) {
+    s[0] = '0';
+    s[1] = '\0';
+    return;
+  }
+  int i = 0;
+  bool neg = false;
+  if (n < 0) {
+    neg = true;
+    n = -n;
+  }
+  while (n > 0) {
+    s[i++] = (n % 10) + '0';
+    n /= 10;
+  }
+  if (neg)
+    s[i++] = '-';
+  s[i] = '\0';
+  for (int j = 0; j < i / 2; j++) {
+    char t = s[j];
+    s[j] = s[i - 1 - j];
+    s[i - 1 - j] = t;
+  }
 }
 
 extern int mouse_x;
@@ -51,7 +93,8 @@ uint32_t *ui_buffer = nullptr;
 uint32_t *frontbuffer = nullptr;
 
 void my_put_pixel(int x, int y, uint32_t color) {
-  if (x < 0 || (uint32_t)x >= screen.width || y < 0 || (uint32_t)y >= screen.height)
+  if (x < 0 || (uint32_t)x >= screen.width || y < 0 ||
+      (uint32_t)y >= screen.height)
     return;
   ui_buffer[y * screen.width + x] = color;
 }
@@ -233,7 +276,8 @@ void draw_wallpaper() {
   uint32_t *wallpaper = (uint32_t *)_binary_fds_raw_start;
   for (uint32_t y = 0; y < screen.height; y++) {
     for (uint32_t x = 0; x < screen.width; x++) {
-      uint32_t col = wallpaper[y * screen.width + x];
+      // Tile 800x600 wallpaper safely
+      uint32_t col = wallpaper[(y % 600) * 800 + (x % 800)];
       uint8_t r = col & 0xFF;
       uint8_t g = (col >> 8) & 0xFF;
       uint8_t b = (col >> 16) & 0xFF;
@@ -556,6 +600,569 @@ void handle_calculator_click(CalcState &cs, int x, int y, int w, int h) {
 }
 
 // ============================================================================
+// SETTINGS APP
+// ============================================================================
+
+struct SettingsState {
+  int language; // 0=EN, 1=DE, 2=FR
+};
+
+void draw_settings_content(int x, int y, int w, int h, SettingsState &ss) {
+  int cy = y + 28;
+  draw_string(x + 10, cy + 10, "Language Settings", 0x333333);
+
+  // Buttons for language
+  draw_rect_alpha(x + 10, cy + 30, 80, 25,
+                  ss.language == 0 ? 0x005A9E : 0xCCCCCC, 255);
+  draw_string(x + 25, cy + 38, "English",
+              ss.language == 0 ? 0xFFFFFF : 0x000000);
+
+  draw_rect_alpha(x + 100, cy + 30, 80, 25,
+                  ss.language == 1 ? 0x005A9E : 0xCCCCCC, 255);
+  draw_string(x + 115, cy + 38, "German",
+              ss.language == 1 ? 0xFFFFFF : 0x000000);
+
+  draw_rect_alpha(x + 190, cy + 30, 80, 25,
+                  ss.language == 2 ? 0x005A9E : 0xCCCCCC, 255);
+  draw_string(x + 205, cy + 38, "French",
+              ss.language == 2 ? 0xFFFFFF : 0x000000);
+}
+
+// ============================================================================
+// DISK MANAGER APP
+// ============================================================================
+
+void draw_disk_manager_content(int x, int y, int w, int h) {
+  int cy = y + 28;
+  draw_string(x + 10, cy + 10, "Disk Manager", 0x333333);
+
+  int active_disk = shell_get_active_disk();
+  bool hdd_present = shell_is_hdd_present();
+  bool mounted = shell_is_fs_mounted();
+
+  char disk_info[50];
+  if (active_disk == 1) {
+    string_copy(disk_info, "[MRD0] RAM Disk - ");
+  } else if (active_disk == 2) {
+    string_copy(disk_info, "[HDD0] Hard Disk - ");
+  } else {
+    string_copy(disk_info, "[---] No active disk - ");
+  }
+
+  if (active_disk > 0 && mounted) {
+    string_copy(disk_info + string_length(disk_info), "FAT16 (Ready)");
+  } else if (active_disk > 0) {
+    string_copy(disk_info + string_length(disk_info), "Not mounted");
+  }
+
+  draw_string(x + 10, cy + 35, disk_info, 0x000000);
+
+  draw_rect_alpha(x, cy + 55, w, 1, 0xCCCCCC, 255);
+
+  // RAM Disk Buttons
+  draw_string(x + 10, cy + 65, "RAM Disk:", 0x333333);
+  draw_rect_alpha(x + 10, cy + 85, 120, 25, 0x005A9E, 255);
+  draw_string(x + 20, cy + 93, "Mount RAM", 0xFFFFFF);
+  draw_rect_alpha(x + 140, cy + 85, 120, 25, 0xEE7700, 255);
+  draw_string(x + 150, cy + 93, "Format RAM", 0xFFFFFF);
+
+  // HDD Buttons
+  draw_string(x + 10, cy + 125,
+              hdd_present ? "Hard Disk:" : "Hard Disk: Not Found", 0x333333);
+  if (hdd_present) {
+    draw_rect_alpha(x + 10, cy + 145, 120, 25, 0x005A9E, 255);
+    draw_string(x + 20, cy + 153, "Mount HDD", 0xFFFFFF);
+    draw_rect_alpha(x + 140, cy + 145, 120, 25, 0xEE7700, 255);
+    draw_string(x + 150, cy + 153, "Format HDD", 0xFFFFFF);
+  }
+
+  // Global Unmount
+  draw_rect_alpha(x + 10, cy + 185, w - 20, 25, 0xCC2222, 255);
+  draw_string(x + (w / 2) - 30, cy + 193, "Unmount", 0xFFFFFF);
+}
+
+bool handle_disk_manager_click(int x, int y, int w) {
+  int cy = y + 28;
+  bool disk_changed = false;
+
+  if (mouse_y >= cy + 85 && mouse_y <= cy + 110) {
+    if (mouse_x >= x + 10 && mouse_x <= x + 130) {
+      shell_mount_disk(1);
+      disk_changed = true;
+    } // Mount RAM
+    else if (mouse_x >= x + 140 && mouse_x <= x + 260) {
+      shell_format_disk(1);
+      disk_changed = true;
+    } // Format RAM
+  }
+
+  bool hdd_present = shell_is_hdd_present();
+  if (hdd_present && mouse_y >= cy + 145 && mouse_y <= cy + 170) {
+    if (mouse_x >= x + 10 && mouse_x <= x + 130) {
+      shell_mount_disk(2);
+      disk_changed = true;
+    } // Mount HDD
+    else if (mouse_x >= x + 140 && mouse_x <= x + 260) {
+      shell_format_disk(2);
+      disk_changed = true;
+    } // Format HDD
+  }
+
+  if (mouse_y >= cy + 185 && mouse_y <= cy + 210) {
+    if (mouse_x >= x + 10 && mouse_x <= x + w - 10) {
+      shell_unmount_disk();
+      disk_changed = true;
+    }
+  }
+
+  return disk_changed;
+}
+
+void handle_settings_click(SettingsState &ss, int x, int y) {
+  int cy = y + 28;
+  // Language clicks
+  if (mouse_y >= cy + 30 && mouse_y <= cy + 55) {
+    if (mouse_x >= x + 10 && mouse_x <= x + 90)
+      ss.language = 0;
+    else if (mouse_x >= x + 100 && mouse_x <= x + 180)
+      ss.language = 1;
+    else if (mouse_x >= x + 190 && mouse_x <= x + 270)
+      ss.language = 2;
+    shell_set_language(ss.language);
+  }
+}
+
+// ============================================================================
+// WORD APP
+// ============================================================================
+
+struct WordState {
+  char buffer[4096];
+  int cursor_pos;
+  char filename[13];
+  int filename_len;
+  bool shift_pressed;
+  bool editing_filename;
+  bool show_open_dialog;
+};
+
+// ============================================================================
+// tabels (SPREADSHEET) APP
+// ============================================================================
+
+struct SheetState {
+  char cells[6][10][32]; // larger for formulas
+  int sel_x, sel_y;
+  char filename[13];
+  int filename_len;
+  bool shift_pressed;
+  bool show_open_dialog;
+};
+
+// Helper for formulas
+int get_cell_int(SheetState &ss, int col, int row, int depth);
+
+int resolve_ref(SheetState &ss, const char *ref, int depth) {
+  if (depth > 5)
+    return 0;
+  if (ref[0] >= 'A' && ref[0] <= 'F' && ref[1] >= '1' && ref[1] <= '9') {
+    int c = ref[0] - 'A';
+    int r = (ref[1] - '1');
+    if (ref[2] == '0')
+      r = 9; // Handle row 10
+    return get_cell_int(ss, c, r, depth + 1);
+  }
+  // Is it just a number?
+  bool num = true;
+  for (int i = 0; ref[i]; i++)
+    if (!(ref[i] >= '0' && ref[i] <= '9') && ref[i] != '-')
+      num = false;
+  if (num) {
+    int res = 0;
+    bool neg = false;
+    int i = 0;
+    if (ref[i] == '-') {
+      neg = true;
+      i++;
+    }
+    while (ref[i] >= '0' && ref[i] <= '9')
+      res = res * 10 + (ref[i++] - '0');
+    return neg ? -res : res;
+  }
+  return 0;
+}
+
+int get_cell_int(SheetState &ss, int col, int row, int depth) {
+  if (col < 0 || col >= 6 || row < 0 || row >= 10)
+    return 0;
+  const char *v = ss.cells[col][row];
+  if (v[0] == '\0')
+    return 0;
+  if (v[0] == '=') {
+    // Formula!
+    if (string_starts_with(v + 1, "SUM(")) {
+      // SUM(A1:A5)
+      int sc = v[5] - 'A';
+      int sr = v[6] - '1';
+      int ec = v[8] - 'A';
+      int er = v[9] - '1';
+      if (v[7] == '0') {
+        sr = 9;
+        ec = v[9] - 'A';
+        er = v[10] - '1';
+      } // Offset check
+      // Simpler: assume format A1:A5 (5 chars) or A1:A10 (6 chars)
+      // Just parse row/col manually for robustness:
+      sc = v[5] - 'A';
+      sr = v[6] - '1';
+      if (v[7] == '0')
+        sr = 9;
+      int colon = 7;
+      if (sr == 9)
+        colon = 8;
+      ec = v[colon + 1] - 'A';
+      er = v[colon + 2] - '1';
+      if (v[colon + 3] == '0')
+        er = 9;
+
+      int sum = 0;
+      for (int r = sr; r <= er; r++)
+        for (int c = sc; c <= ec; c++)
+          sum += get_cell_int(ss, c, r, depth + 1);
+      return sum;
+    }
+    // Basic A1+B2
+    char r1[8] = {0}, r2[8] = {0};
+    char op = 0;
+    int i = 1, j = 0;
+    while (v[i] && v[i] != '+' && v[i] != '-' && v[i] != '*' && v[i] != '/')
+      r1[j++] = v[i++];
+    if (v[i]) {
+      op = v[i++];
+      j = 0;
+      while (v[i])
+        r2[j++] = v[i++];
+      int v1 = resolve_ref(ss, r1, depth);
+      int v2 = resolve_ref(ss, r2, depth);
+      if (op == '+')
+        return v1 + v2;
+      if (op == '-')
+        return v1 - v2;
+      if (op == '*')
+        return v1 * v2;
+      if (op == '/')
+        return v2 ? v1 / v2 : 0;
+    }
+    return resolve_ref(ss, r1, depth);
+  }
+  // Raw number
+  int res = 0;
+  bool neg = false;
+  int i = 0;
+  if (v[i] == '-') {
+    neg = true;
+    i++;
+  }
+  while (v[i] >= '0' && v[i] <= '9')
+    res = res * 10 + (v[i++] - '0');
+  return neg ? -res : res;
+}
+
+void draw_sheet_content(int x, int y, int w, int h, SheetState &ss) {
+  int cy = y + 28;
+  // Toolbar
+  draw_rect_alpha(x, cy, w, 30, 0xEEEEEE, 255);
+
+  // Save/Load buttons
+  draw_rect_alpha(x + 10, cy + 5, 50, 20, 0x107C10, 255); // tabels green
+  draw_string(x + 15, cy + 11, "Save", 0xFFFFFF);
+
+  draw_rect_alpha(x + 70, cy + 5, 50, 20, 0x107C10, 255);
+  draw_string(x + 75, cy + 11, "Load", 0xFFFFFF);
+
+  draw_string(x + 130, cy + 11, ss.filename, 0x333333);
+
+  int grid_y = cy + 30;
+  int cell_w = (w - 20) / 6;
+  int cell_h = (h - 28 - 30) / 10;
+
+  // Draw Column Headers (A-F)
+  for (int col = 0; col < 6; col++) {
+    char label[2] = {(char)('A' + col), '\0'};
+    draw_rect_alpha(x + col * cell_w, grid_y, cell_w, 20, 0xCCCCCC, 255);
+    draw_string(x + col * cell_w + (cell_w / 2) - 4, grid_y + 6, label,
+                0x000000);
+  }
+
+  // Draw grid
+  for (int row = 0; row < 10; row++) {
+    for (int col = 0; col < 6; col++) {
+      int cx = x + col * cell_w;
+      int cy_cell = grid_y + 20 + row * cell_h;
+
+      uint32_t bg = (ss.sel_x == col && ss.sel_y == row) ? 0xCCFFCC : 0xFFFFFF;
+      draw_rect_alpha(cx, cy_cell, cell_w, cell_h, bg, 255);
+
+      // Border
+      draw_rect_alpha(cx, cy_cell, cell_w, 1, 0xBBBBBB, 255);
+      draw_rect_alpha(cx, cy_cell, 1, cell_h, 0xBBBBBB, 255);
+
+      if (ss.sel_x == col && ss.sel_y == row) {
+        // Show formula while editing
+        draw_string(cx + 4, cy_cell + (cell_h / 2) - 4, ss.cells[col][row],
+                    0x000000);
+      } else {
+        // Show result
+        if (ss.cells[col][row][0] == '=') {
+          int val = get_cell_int(ss, col, row, 0);
+          char buf[16];
+          itoa_light(val, buf);
+          draw_string(cx + 4, cy_cell + (cell_h / 2) - 4, buf,
+                      0x015A01); // Dark green for formulas
+        } else {
+          draw_string(cx + 4, cy_cell + (cell_h / 2) - 4, ss.cells[col][row],
+                      0x000000);
+        }
+      }
+    }
+  }
+
+  if (ss.show_open_dialog) {
+    draw_rect_alpha(x + 20, y + 60, w - 40, h - 100, 0xFFFFFF, 255);
+    draw_rect_alpha(x + 20, y + 60, w - 40, 25, 0x107C10, 255);
+    draw_string(x + 30, y + 68, "Select File (.SHT)", 0xFFFFFF);
+
+    int count = get_shell_file_count();
+    int visible = 0;
+    for (int i = 0; i < count && visible < 8; i++) {
+      char name[16];
+      get_shell_file_name(i, name);
+      if (!get_shell_file_is_dir(i)) {
+        draw_string(x + 30, y + 95 + visible * 20, name, 0x000000);
+        visible++;
+      }
+    }
+  }
+}
+
+bool handle_sheet_click(SheetState &ss, int x, int y, int w, int h) {
+  int cy = y + 28;
+
+  if (ss.show_open_dialog) {
+    if (mouse_y >= y + 90 && mouse_y < y + 90 + 160) {
+      int idx = (mouse_y - (y + 90)) / 20;
+      // Find the idx-th non-directory file
+      int found = -1;
+      int current = 0;
+      for (int i = 0; i < get_shell_file_count(); i++) {
+        if (!get_shell_file_is_dir(i)) {
+          if (current == idx) {
+            found = i;
+            break;
+          }
+          current++;
+        }
+      }
+      if (found != -1) {
+        get_shell_file_name(found, ss.filename);
+        ss.filename_len = string_length(ss.filename);
+        shell_read_file(ss.filename, (char *)ss.cells, sizeof(ss.cells));
+        ss.show_open_dialog = false;
+        return true;
+      }
+    }
+    if (mouse_x < x + 20 || mouse_x > x + w - 20 || mouse_y < y + 60 ||
+        mouse_y > y + h - 40) {
+      ss.show_open_dialog = false;
+      return true;
+    }
+    return false;
+  }
+
+  // Save/Load
+  if (mouse_y >= cy + 5 && mouse_y <= cy + 25) {
+    if (mouse_x >= x + 10 && mouse_x <= x + 60) {
+      shell_write_file(ss.filename, (char *)ss.cells, sizeof(ss.cells));
+      return true;
+    }
+    if (mouse_x >= x + 70 && mouse_x <= x + 120) {
+      ss.show_open_dialog = true;
+      return true;
+    }
+  }
+
+  // Grid selection
+  int grid_y = cy + 30;
+  int cell_w = (w - 20) / 6;
+  int cell_h = (h - 28 - 30) / 10;
+  if (mouse_x >= x && mouse_x < x + cell_w * 6 && mouse_y >= grid_y + 20) {
+    ss.sel_x = (mouse_x - x) / cell_w;
+    ss.sel_y = (mouse_y - (grid_y + 20)) / cell_h;
+    if (ss.sel_x < 0)
+      ss.sel_x = 0;
+    if (ss.sel_x > 5)
+      ss.sel_x = 5;
+    if (ss.sel_y < 0)
+      ss.sel_y = 0;
+    if (ss.sel_y > 9)
+      ss.sel_y = 9;
+    return true;
+  }
+
+  return false;
+}
+
+void draw_word_content(int x, int y, int w, int h, WordState &ws) {
+  int cy = y + 28;
+  // Toolbar
+  draw_rect_alpha(x, cy, w, 30, 0xDDDDDD, 255);
+
+  // Save/Load buttons
+  draw_rect_alpha(x + 10, cy + 5, 60, 20, 0x005A9E, 255);
+  draw_string(x + 20, cy + 11, "Save", 0xFFFFFF);
+
+  draw_rect_alpha(x + 80, cy + 5, 60, 20, 0x005A9E, 255);
+  draw_string(x + 90, cy + 11, "Load", 0xFFFFFF);
+
+  draw_string(x + 150, cy + 11, "File:", 0x333333);
+
+  draw_rect_alpha(x + 190, cy + 5, 100, 20,
+                  ws.editing_filename ? 0xBBBBBB : 0xFFFFFF, 255);
+  draw_string(x + 195, cy + 11, ws.filename, 0x000000);
+
+  if (ws.show_open_dialog) {
+    draw_rect_alpha(x + 10, cy + 40, w - 20, h - 75, 0xEEEEEE, 255);
+    int list_y = cy + 45;
+    int count = get_shell_file_count();
+    draw_string(x + 15, list_y, "Select a file to load:", 0x000000);
+    for (int i = 0; i < count && i < 10; i++) {
+      char name[16];
+      get_shell_file_name(i, name);
+      draw_rect_alpha(x + 15, list_y + 20 + i * 20, w - 30, 18, 0xFFFFFF, 255);
+      draw_string(x + 20, list_y + 25 + i * 20, name, 0x000000);
+    }
+    return; // Don't draw text area behind
+  }
+
+  // Text area
+  draw_rect_alpha(x + 10, cy + 40, w - 20, h - 75, 0xFFFFFF, 255);
+  draw_rect_alpha(x + 10, cy + 40, w - 20, h - 75, 0x999999,
+                  255); // wait, to draw black outline I'd need edges
+  // Just draw a thin outline manually:
+  draw_rect_alpha(x + 10, cy + 40, w - 20, 1, 0x999999, 255);
+  draw_rect_alpha(x + 10, cy + 40, 1, h - 75, 0x999999, 255);
+
+  // Draw text
+  int tx = x + 15;
+  int ty = cy + 45;
+  for (int i = 0; i <= ws.cursor_pos; i++) {
+    if (i == ws.cursor_pos && !ws.editing_filename) {
+      // Draw cursor (blinking)
+      Time t = get_time();
+      if (t.second % 2 == 0) {
+        draw_rect_alpha(tx, ty, 6, 12, 0x000000, 255);
+      }
+      break;
+    }
+    if (i == ws.cursor_pos)
+      break;
+
+    char c = ws.buffer[i];
+    if (c == '\n') {
+      tx = x + 15;
+      ty += 14;
+    } else {
+      draw_char(tx, ty, c, 0x000000);
+      tx += 8;
+      if (tx > x + w - 25) {
+        tx = x + 15;
+        ty += 14;
+      }
+    }
+  }
+}
+
+void handle_word_click(WordState &ws, int x, int y) {
+  int cy = y + 28;
+
+  if (ws.show_open_dialog) {
+    int list_y = cy + 45;
+    int count = get_shell_file_count();
+    for (int i = 0; i < count && i < 10; i++) {
+      if (mouse_y >= list_y + 20 + i * 20 && mouse_y <= list_y + 38 + i * 20) {
+        // picked a file
+        char name[16];
+        get_shell_file_name(i, name);
+        string_copy(ws.filename, name);
+        ws.filename_len = string_length(name);
+        if (shell_read_file(ws.filename, ws.buffer, 4096)) {
+          ws.cursor_pos = 0;
+          while (ws.buffer[ws.cursor_pos] != '\0' && ws.cursor_pos < 4096)
+            ws.cursor_pos++;
+        } else {
+          ws.buffer[0] = '\0';
+          ws.cursor_pos = 0;
+        }
+        ws.show_open_dialog = false;
+        return;
+      }
+    }
+    ws.show_open_dialog = false;
+    return;
+  }
+
+  // buttons
+  if (mouse_y >= cy + 5 && mouse_y <= cy + 25) {
+    if (mouse_x >= x + 10 && mouse_x <= x + 70) {
+      shell_write_file(ws.filename, ws.buffer, ws.cursor_pos);
+    } else if (mouse_x >= x + 80 && mouse_x <= x + 140) {
+      ws.show_open_dialog = true;
+    } else if (mouse_x >= x + 190 && mouse_x <= x + 290) {
+      ws.editing_filename = true;
+      return;
+    }
+  }
+  ws.editing_filename = false;
+}
+
+void handle_word_key(WordState &ws, uint8_t scancode) {
+  if (scancode == 0x2A || scancode == 0x36)
+    ws.shift_pressed = true;
+  else if (scancode == 0xAA || scancode == 0xB6)
+    ws.shift_pressed = false;
+  else if ((scancode & 0x80) == 0) { // key press
+    if (ws.editing_filename) {
+      if (scancode == 0x0E && ws.filename_len > 0) { // Backspace
+        ws.filename[--ws.filename_len] = '\0';
+      } else if (scancode == 0x1C) { // Enter
+        ws.editing_filename = false;
+      } else {
+        char ch = shell_scancode_to_ascii(scancode, ws.shift_pressed);
+        if (ch && ws.filename_len < 12) {
+          ws.filename[ws.filename_len++] = ch;
+          ws.filename[ws.filename_len] = '\0';
+        }
+      }
+    } else {
+      if (scancode == 0x0E && ws.cursor_pos > 0) { // Backspace
+        ws.cursor_pos--;
+        ws.buffer[ws.cursor_pos] = '\0';
+      } else if (scancode == 0x1C && ws.cursor_pos < 4095) { // Enter
+        ws.buffer[ws.cursor_pos++] = '\n';
+        ws.buffer[ws.cursor_pos] = '\0';
+      } else {
+        char ch = shell_scancode_to_ascii(scancode, ws.shift_pressed);
+        // Simple printable ascii
+        if (ch >= 32 && ch <= 126 && ws.cursor_pos < 4095) {
+          ws.buffer[ws.cursor_pos++] = ch;
+          ws.buffer[ws.cursor_pos] = '\0';
+        }
+      }
+    }
+  }
+}
+
+// ============================================================================
 // UI COMPOSITION
 // ============================================================================
 
@@ -567,8 +1174,11 @@ struct WinState {
   int drag_ox, drag_oy;
 };
 
-void draw_all_ui(WinState &welcome, WinState &fm, WinState &calc, CalcState &cs,
-                 int fm_selected, int fm_scroll) {
+void draw_all_ui(WinState &welcome, WinState &fm, WinState &calc,
+                 WinState &word, WinState &tabels, WinState &settings,
+                 WinState &disk_manager, CalcState &cs, WordState &ws,
+                 SheetState &sss, SettingsState &ss, int fm_selected,
+                 int fm_scroll) {
   draw_wallpaper();
 
   // Draw Welcome window
@@ -614,13 +1224,57 @@ void draw_all_ui(WinState &welcome, WinState &fm, WinState &calc, CalcState &cs,
     }
   }
 
+  // Draw Word window (Documents)
+  if (word.open) {
+    if (!word.minimized) {
+      draw_window(word.x, word.y, word.w, word.h, "Documents", true);
+      draw_word_content(word.x, word.y, word.w, word.h, ws);
+    } else {
+      draw_window(word.x, word.y, word.w, 28, "Documents", true);
+    }
+  }
+
+  // Draw tabels window (tabels)
+  if (tabels.open) {
+    if (!tabels.minimized) {
+      draw_window(tabels.x, tabels.y, tabels.w, tabels.h, "tabels", true);
+      draw_sheet_content(tabels.x, tabels.y, tabels.w, tabels.h, sss);
+    } else {
+      draw_window(tabels.x, tabels.y, tabels.w, 28, "tabels", true);
+    }
+  }
+
+  // Draw Settings window
+  if (settings.open) {
+    if (!settings.minimized) {
+      draw_window(settings.x, settings.y, settings.w, settings.h, "Settings",
+                  true);
+      draw_settings_content(settings.x, settings.y, settings.w, settings.h, ss);
+    } else {
+      draw_window(settings.x, settings.y, settings.w, 28, "Settings", true);
+    }
+  }
+
+  // Draw Disk Manager window
+  if (disk_manager.open) {
+    if (!disk_manager.minimized) {
+      draw_window(disk_manager.x, disk_manager.y, disk_manager.w,
+                  disk_manager.h, "Disk Manager", true);
+      draw_disk_manager_content(disk_manager.x, disk_manager.y, disk_manager.w,
+                                disk_manager.h);
+    } else {
+      draw_window(disk_manager.x, disk_manager.y, disk_manager.w, 28,
+                  "Disk Manager", true);
+    }
+  }
+
   draw_top_bar();
 }
 
 void draw_menu_dropdown() {
   int mw = 180;
   int item_h = 30;
-  int item_count = 3;
+  int item_count = 7;
   int mh = item_count * item_h + 10;
   int mx = (screen.width - mw) / 2;
   int my = (screen.height - mh) / 2;
@@ -629,7 +1283,9 @@ void draw_menu_dropdown() {
   draw_rect_alpha(mx + 4, my + 4, mw, mh, 0x000000, 80);
   draw_rect_alpha(mx, my, mw, mh, 0x000000, 180);
 
-  const char *labels[3] = {"Welcome", "File Manager", "Calculator"};
+  const char *labels[7] = {"Welcome",     "File Manager", "Calculator",
+                           "Documents",   "tabels",       "Settings",
+                           "Disk Manager"};
   for (int i = 0; i < item_count; i++) {
     int iy = my + 5 + i * item_h;
     // Hover highlight
@@ -668,23 +1324,62 @@ bool handle_window_titlebar(WinState &win, int mx, int my, bool clicked) {
 extern "C" void start_graphical_shell() {
   ui_buffer = (uint32_t *)malloc(screen.width * screen.height * 4);
   frontbuffer = (uint32_t *)malloc(screen.width * screen.height * 4);
-  
-  // Initialize frontbuffer to something distinct so the first frame draws fully
+
+  if (!ui_buffer || !frontbuffer) {
+    // Emergency fallback if heap fails
+    return;
+  }
+
+  // Initialize buffers
   for (uint32_t i = 0; i < screen.width * screen.height; i++) {
-    frontbuffer[i] = 0x00000000;
+    ui_buffer[i] = 0;
+    frontbuffer[i] = 0x00000001; // Distinct value
   }
 
   init_minimal_font();
 
-  WinState welcome = {80, 60, 640, 340, true, false, false, 0, 0};
-  WinState fm = {120, 80, 500, 380, false, false, false, 0, 0};
-  WinState calc = {200, 100, 200, 280, false, false, false, 0, 0};
+  static WinState welcome = {80, 60, 640, 340, true, false, false, 0, 0};
+  static WinState fm = {120, 80, 500, 380, false, false, false, 0, 0};
+  static WinState calc = {200, 100, 200, 280, false, false, false, 0, 0};
+  static WinState word = {50, 50, 500, 400, false, false, false, 0, 0};
+  static WinState tabels = {100, 100, 500, 300, false, false, false, 0, 0};
+  static WinState settings = {300, 100, 300, 100, false, false, false, 0, 0};
+  static WinState disk_manager = {350,   150,   300, 250, false,
+                                  false, false, 0,   0};
 
-  CalcState cs;
+  static CalcState cs;
   string_copy(cs.display, "0");
   cs.first_val = 0;
   cs.last_op = 0;
   cs.next_clears = true;
+
+  static WordState ws;
+  string_copy(ws.filename, "DOC.TXT");
+  ws.filename_len = 7;
+  ws.buffer[0] = '\0';
+  ws.cursor_pos = 0;
+  ws.shift_pressed = false;
+  ws.editing_filename = false;
+  ws.show_open_dialog = false;
+
+  static SheetState sss;
+  static bool sss_init = false;
+  if (!sss_init) {
+    for (int r = 0; r < 10; r++) {
+      for (int c = 0; c < 6; c++) {
+        sss.cells[c][r][0] = '\0';
+      }
+    }
+    sss.sel_x = 0;
+    sss.sel_y = 0;
+    string_copy(sss.filename, "BOOK.SHT");
+    sss.filename_len = 8;
+    sss.shift_pressed = false;
+    sss.show_open_dialog = false;
+    sss_init = true;
+  }
+
+  static SettingsState ss = {0}; // 0 = EN
 
   int fm_selected = 0;
   int fm_scroll = 0;
@@ -698,12 +1393,64 @@ extern "C" void start_graphical_shell() {
   bool first_frame = true;
 
   while (1) {
-    get_keyboard_input_nonblock();
+    uint8_t scancode = get_keyboard_input_nonblock();
+
+    bool needs_redraw = first_frame;
+    first_frame = false;
+
+    if (scancode == 0x3B) { // F1 - Global Super Key for Milla OS
+      menu_open = !menu_open;
+      needs_redraw = true;
+    }
+
+    if (scancode != 0 && word.open && !word.minimized) {
+      handle_word_key(ws, scancode);
+      needs_redraw = true;
+    }
+
+    // Keyboard in tabels
+    if (scancode != 0 && tabels.open && !tabels.minimized && !tabels.dragging) {
+      if (scancode == 0x2A || scancode == 0x36)
+        sss.shift_pressed = true;
+      else if (scancode == (0x2A | 0x80) || scancode == (0x36 | 0x80))
+        sss.shift_pressed = false;
+      else if (!(scancode & 0x80)) {
+        if (scancode == 0x0E) { // Backspace
+          int len = string_length(sss.cells[sss.sel_x][sss.sel_y]);
+          if (len > 0)
+            sss.cells[sss.sel_x][sss.sel_y][len - 1] = '\0';
+          needs_redraw = true;
+        } else if (scancode == 0x1C) { // Enter moves down
+          sss.sel_y = (sss.sel_y + 1) % 10;
+          needs_redraw = true;
+        } else if (scancode == 0x48) { // Up
+          sss.sel_y = (sss.sel_y + 9) % 10;
+          needs_redraw = true;
+        } else if (scancode == 0x50) { // Down
+          sss.sel_y = (sss.sel_y + 1) % 10;
+          needs_redraw = true;
+        } else if (scancode == 0x4B) { // Left
+          sss.sel_x = (sss.sel_x + 5) % 6;
+          needs_redraw = true;
+        } else if (scancode == 0x4D) { // Right
+          sss.sel_x = (sss.sel_x + 1) % 6;
+          needs_redraw = true;
+        } else {
+          char c = shell_scancode_to_ascii(scancode, sss.shift_pressed);
+          if (c >= 32 && c <= 126) {
+            int len = string_length(sss.cells[sss.sel_x][sss.sel_y]);
+            if (len < 31) {
+              sss.cells[sss.sel_x][sss.sel_y][len] = c;
+              sss.cells[sss.sel_x][sss.sel_y][len + 1] = '\0';
+              needs_redraw = true;
+            }
+          }
+        }
+      }
+    }
 
     bool mouse_clicked = mouse_left && !last_mouse_left_state;
     bool mouse_released = !mouse_left && last_mouse_left_state;
-    bool needs_redraw = first_frame;
-    first_frame = false;
 
     // --- Menu button click ---
     if (mouse_clicked) {
@@ -717,7 +1464,7 @@ extern "C" void start_graphical_shell() {
       else if (menu_open) {
         int mw = 180;
         int item_h = 30;
-        int item_count = 3;
+        int item_count = 7;
         int mh = item_count * item_h + 10;
         int mx_menu = (screen.width - mw) / 2;
         int my_menu = (screen.height - mh) / 2;
@@ -741,6 +1488,18 @@ extern "C" void start_graphical_shell() {
           } else if (item == 2) { // Calculator
             calc.open = true;
             calc.minimized = false;
+          } else if (item == 3) { // Documents
+            word.open = true;
+            word.minimized = false;
+          } else if (item == 4) { // tabels
+            tabels.open = true;
+            tabels.minimized = false;
+          } else if (item == 5) { // Settings
+            settings.open = true;
+            settings.minimized = false;
+          } else if (item == 6) { // Disk Manager
+            disk_manager.open = true;
+            disk_manager.minimized = false;
           }
         }
         menu_open = false;
@@ -754,6 +1513,33 @@ extern "C" void start_graphical_shell() {
       needs_redraw = true;
     }
 
+    // --- Word content clicks ---
+    if (mouse_clicked && word.open && !word.minimized) {
+      handle_word_click(ws, word.x, word.y);
+      needs_redraw = true;
+    }
+
+    // --- tabels content clicks ---
+    if (mouse_clicked && tabels.open && !tabels.minimized) {
+      handle_sheet_click(sss, tabels.x, tabels.y, tabels.w, tabels.h);
+      needs_redraw = true;
+    }
+
+    // --- Settings content clicks ---
+    if (mouse_clicked && settings.open && !settings.minimized) {
+      handle_settings_click(ss, settings.x, settings.y);
+      needs_redraw = true;
+    }
+
+    // --- Disk Manager content clicks ---
+    if (mouse_clicked && disk_manager.open && !disk_manager.minimized) {
+      if (handle_disk_manager_click(disk_manager.x, disk_manager.y,
+                                    disk_manager.w)) {
+        fm_files_loaded = false; // force fm refresh
+      }
+      needs_redraw = true;
+    }
+
     // --- File Manager content clicks ---
     if (mouse_clicked && fm.open && !fm.minimized) {
       int content_y = fm.y + 28 + 22;
@@ -764,6 +1550,23 @@ extern "C" void start_graphical_shell() {
         int clicked_row = (mouse_y - content_y) / row_height;
         int new_sel = clicked_row + fm_scroll;
         if (new_sel >= 0 && new_sel < get_shell_file_count()) {
+          if (fm_selected == new_sel && !get_shell_file_is_dir(new_sel)) {
+            // Double clicked: Open in Documents
+            char name[16];
+            get_shell_file_name(new_sel, name);
+            string_copy(ws.filename, name);
+            ws.filename_len = string_length(name);
+            if (shell_read_file(ws.filename, ws.buffer, 4096)) {
+              ws.cursor_pos = 0;
+              while (ws.buffer[ws.cursor_pos] != '\0' && ws.cursor_pos < 4096)
+                ws.cursor_pos++;
+            } else {
+              ws.buffer[0] = '\0';
+              ws.cursor_pos = 0;
+            }
+            word.open = true;
+            word.minimized = false;
+          }
           fm_selected = new_sel;
           needs_redraw = true;
         }
@@ -772,10 +1575,19 @@ extern "C" void start_graphical_shell() {
 
     // --- Title bar interactions ---
     if (mouse_clicked) {
-      // Calculator > FM > Welcome (priority)
-      if (!handle_window_titlebar(calc, mouse_x, mouse_y, true)) {
-        if (!handle_window_titlebar(fm, mouse_x, mouse_y, true)) {
-          handle_window_titlebar(welcome, mouse_x, mouse_y, true);
+      // Priority: Disk Manager > Settings > tabels > Word > Calculator > FM >
+      // Welcome
+      if (!handle_window_titlebar(disk_manager, mouse_x, mouse_y, true)) {
+        if (!handle_window_titlebar(settings, mouse_x, mouse_y, true)) {
+          if (!handle_window_titlebar(tabels, mouse_x, mouse_y, true)) {
+            if (!handle_window_titlebar(word, mouse_x, mouse_y, true)) {
+              if (!handle_window_titlebar(calc, mouse_x, mouse_y, true)) {
+                if (!handle_window_titlebar(fm, mouse_x, mouse_y, true)) {
+                  handle_window_titlebar(welcome, mouse_x, mouse_y, true);
+                }
+              }
+            }
+          }
         }
       }
       needs_redraw = true;
@@ -783,18 +1595,31 @@ extern "C" void start_graphical_shell() {
 
     // --- Release drag ---
     if (mouse_released) {
-      if (welcome.dragging || fm.dragging || calc.dragging) {
+      if (welcome.dragging || fm.dragging || calc.dragging || word.dragging ||
+          settings.dragging || disk_manager.dragging) {
         if (welcome.dragging)
           welcome.minimized = false;
         if (fm.dragging)
           fm.minimized = false;
         if (calc.dragging)
           calc.minimized = false;
+        if (word.dragging)
+          word.minimized = false;
+        if (tabels.dragging)
+          tabels.minimized = false;
+        if (settings.dragging)
+          settings.minimized = false;
+        if (disk_manager.dragging)
+          disk_manager.minimized = false;
         needs_redraw = true;
       }
       welcome.dragging = false;
       fm.dragging = false;
       calc.dragging = false;
+      word.dragging = false;
+      tabels.dragging = false;
+      settings.dragging = false;
+      disk_manager.dragging = false;
     }
 
     // --- Dragging ---
@@ -814,11 +1639,32 @@ extern "C" void start_graphical_shell() {
         calc.y = mouse_y - calc.drag_oy;
         needs_redraw = true;
       }
+      if (word.dragging) {
+        word.x = mouse_x - word.drag_ox;
+        word.y = mouse_y - word.drag_oy;
+        needs_redraw = true;
+      }
+      if (settings.dragging) {
+        settings.x = mouse_x - settings.drag_ox;
+        settings.y = mouse_y - settings.drag_oy;
+        needs_redraw = true;
+      }
+      if (tabels.dragging) {
+        tabels.x = mouse_x - tabels.drag_ox;
+        tabels.y = mouse_y - tabels.drag_oy;
+        needs_redraw = true;
+      }
+      if (disk_manager.dragging) {
+        disk_manager.x = mouse_x - disk_manager.drag_ox;
+        disk_manager.y = mouse_y - disk_manager.drag_oy;
+        needs_redraw = true;
+      }
     }
 
     // --- Redraw ---
     if (needs_redraw) {
-      draw_all_ui(welcome, fm, calc, cs, fm_selected, fm_scroll);
+      draw_all_ui(welcome, fm, calc, word, tabels, settings, disk_manager, cs,
+                  ws, sss, ss, fm_selected, fm_scroll);
       if (menu_open)
         draw_menu_dropdown();
     }
@@ -827,15 +1673,17 @@ extern "C" void start_graphical_shell() {
       for (int y = 0; y < (int)screen.height; y++) {
         for (int x = 0; x < (int)screen.width; x++) {
           uint32_t pixel = ui_buffer[y * screen.width + x];
-          
+
           bool is_mouse = false;
-          if (x == mouse_x && y >= mouse_y - 5 && y <= mouse_y + 5) is_mouse = true;
-          if (y == mouse_y && x >= mouse_x - 5 && x <= mouse_x + 5) is_mouse = true;
-          
+          if (x == mouse_x && y >= mouse_y - 5 && y <= mouse_y + 5)
+            is_mouse = true;
+          if (y == mouse_y && x >= mouse_x - 5 && x <= mouse_x + 5)
+            is_mouse = true;
+
           if (is_mouse) {
             pixel = 0xFFFFFF;
           }
-          
+
           if (frontbuffer[y * screen.width + x] != pixel) {
             frontbuffer[y * screen.width + x] = pixel;
             put_pixel(x, y, pixel);

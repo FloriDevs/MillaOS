@@ -23,7 +23,7 @@ void memcpy(void *dest, const void *src, uint32_t size);
 
 // Minimal heap implementation (for example only)
 // Increased heap size for safety
-static uint8_t kernel_heap[4 * 1024 * 1024]; // 4 MB heap
+static uint8_t kernel_heap[16 * 1024 * 1024]; // 16 MB heap
 static size_t heap_top = 0;
 
 extern "C" void *malloc(size_t size) {
@@ -2254,8 +2254,19 @@ const char scancode_map_de_shift[] = {
     'J', 'K', 'L', (char)0x99, (char)0x8E, (char)0xF8, 0,   '\'', 'Y',
     'X', 'C', 'V', 'B',        'N',        'M',        ';', ':',  '_',
     0,   0,   0,   ' '};
-const char *current_scancode_map = scancode_map_de;
-const char *current_scancode_map_shift = scancode_map_de_shift;
+const char scancode_map_fr[] = {
+    0,   0,   '&', (char)0xE9, '"', '\'', '(', '-', (char)0xE8, '_', (char)0xE7, (char)0xE0, ')', '=',  0,
+    0,   'a', 'z', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p',  '^', '$', 0,    0,
+    'q', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', 'm', (char)0xF9, '*', 0,   '\\', 'w',
+    'x', 'c', 'v', 'b', 'n', ',', ';', ':', '!', 0,   0,    0,   ' '};
+const char scancode_map_fr_shift[] = {
+    0,   0,   '1', '2', '3', '4', '5', '6', '7', '8', '9',  '0', '\0', '+', 0,
+    0,   'A', 'Z', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', (char)0xA8, (char)0xA3, 0,   0,
+    'Q', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', 'M', '%',  (char)0xB5, 0,  '|', 'W',
+    'X', 'C', 'V', 'B', 'N', '?', '.', '/', (char)0xA7, 0,  0,    0,   ' '};
+
+const char *current_scancode_map = scancode_map_us;
+const char *current_scancode_map_shift = scancode_map_us_shift;
 
 char scancode_to_ascii(uint8_t scancode, bool shift) {
   if (scancode < 58) {
@@ -2303,6 +2314,87 @@ extern "C" void shell_refresh_files() {
 }
 
 extern "C" bool shell_is_fs_mounted() { return fs_mounted; }
+
+extern "C" char shell_scancode_to_ascii(uint8_t scancode, bool shift) {
+  return scancode_to_ascii(scancode, shift);
+}
+
+extern "C" void shell_set_language(int lang) {
+  if (lang == 1) {
+    current_scancode_map = scancode_map_de;
+    current_scancode_map_shift = scancode_map_de_shift;
+  } else if (lang == 2) {
+    current_scancode_map = scancode_map_fr;
+    current_scancode_map_shift = scancode_map_fr_shift;
+  } else {
+    current_scancode_map = scancode_map_us;
+    current_scancode_map_shift = scancode_map_us_shift;
+  }
+}
+
+extern "C" bool shell_read_file(const char *filename, char *buffer, uint32_t max_size) {
+  int file_idx = find_file(filename);
+  if (file_idx != -1 && fs_mounted && active_disk) {
+      return read_file(active_disk, file_cache[file_idx].first_cluster, buffer, max_size);
+  }
+  return false;
+}
+
+extern "C" bool shell_write_file(const char *filename, const char *data, uint32_t size) {
+  if (fs_mounted && active_disk) {
+      bool res = write_file(active_disk, filename, data, size);
+      if (res) read_directory(active_disk, root_dir_first_cluster);
+      return res;
+  }
+  return false;
+}
+
+extern "C" bool shell_format_disk(int disk_id) {
+  ATADevice *disk = disk_id == 1 ? &ramdisk_device : (hdd_device.present ? &hdd_device : nullptr);
+  if (disk) {
+      return format_fat16(disk, 0, disk->size_sectors);
+  }
+  return false;
+}
+
+extern "C" bool shell_mount_disk(int disk_id) {
+  ATADevice *disk = disk_id == 1 ? &ramdisk_device : (hdd_device.present ? &hdd_device : nullptr);
+  if (disk) {
+      if (mount_fat16(disk, 0)) {
+          active_disk = disk;
+          read_directory(active_disk, root_dir_first_cluster);
+          return true;
+      }
+      if (disk == &hdd_device && ata_read_sector(disk, 0, sector_buffer)) {
+         MBR *mbr = (MBR *)sector_buffer;
+         for (int i = 0; i < 4; i++) {
+           if (mbr->partitions[i].total_sectors > 0) {
+             if (mount_fat16(disk, mbr->partitions[i].start_lba)) {
+               active_disk = disk;
+               read_directory(active_disk, root_dir_first_cluster);
+               return true;
+             }
+           }
+         }
+      }
+  }
+  return false;
+}
+
+extern "C" void shell_unmount_disk() {
+  fs_mounted = false;
+  file_count = 0;
+}
+
+extern "C" int shell_get_active_disk() {
+  if (active_disk == &ramdisk_device) return 1;
+  if (active_disk == &hdd_device) return 2;
+  return 0;
+}
+
+extern "C" bool shell_is_hdd_present() {
+  return hdd_device.present;
+}
 
 // ============================================================================
 // SIMULIERTER C++ PROGRAMM-LADER
@@ -4664,17 +4756,19 @@ extern "C" void kernel_main(uint32_t magic, multiboot_info *info) {
   if (screen.active) {
     // We will call the graphical shell here
     // For now, let's just clear the screen to a modern dark grey
-    for (uint32_t y = 0; y < screen.height; y++) {
-      for (uint32_t x = 0; x < screen.width; x++) {
-        put_pixel(x, y, 0x1A1A1A);
-      }
+    // Clear screen efficiently
+    if (screen.framebuffer) {
+        uint32_t total_pixels = screen.width * screen.height;
+        for (uint32_t i = 0; i < total_pixels; i++) {
+            screen.framebuffer[i] = 0x1A1A1A;
+        }
     }
+    init_filesystem();
+    Network::init();
     start_graphical_shell();
 
-    // Fallback if shell returns (or for now since it's not implemented)
+    // Fallback if shell returns
     // draw_flower();
-    // init_filesystem();
-    // Network::init();
     // MTop();
   } else {
     draw_flower();
