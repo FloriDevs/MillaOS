@@ -22,6 +22,7 @@ uint32_t get_shell_file_size(int index);
 bool get_shell_file_is_dir(int index);
 void shell_refresh_files();
 bool shell_is_fs_mounted();
+void *malloc(uint32_t size);
 }
 
 extern int mouse_x;
@@ -46,6 +47,15 @@ extern uint8_t _binary_off_raw_start[];
 extern uint8_t _binary_logo1_raw_start[];
 extern uint8_t _binary_logo2_raw_start[];
 
+uint32_t *ui_buffer = nullptr;
+uint32_t *frontbuffer = nullptr;
+
+void my_put_pixel(int x, int y, uint32_t color) {
+  if (x < 0 || (uint32_t)x >= screen.width || y < 0 || (uint32_t)y >= screen.height)
+    return;
+  ui_buffer[y * screen.width + x] = color;
+}
+
 // Alpha blending: (src * alpha + dest * (255 - alpha)) / 255
 uint32_t blend(uint32_t src, uint32_t dest, uint8_t alpha) {
   uint32_t rb = (src & 0xFF00FF) * alpha + (dest & 0xFF00FF) * (256 - alpha);
@@ -61,10 +71,10 @@ void draw_rect_alpha(int x, int y, int w, int h, uint32_t color,
           (uint32_t)i >= screen.height)
         continue;
       if (alpha == 255) {
-        put_pixel(j, i, color);
+        my_put_pixel(j, i, color);
       } else {
-        uint32_t dest = screen.framebuffer[i * (screen.pitch / 4) + j];
-        put_pixel(j, i, blend(color, dest, alpha));
+        uint32_t dest = ui_buffer[i * screen.width + j];
+        my_put_pixel(j, i, blend(color, dest, alpha));
       }
     }
   }
@@ -166,7 +176,7 @@ void draw_char(int x, int y, char c, uint32_t color) {
   for (int i = 0; i < 8; i++) {
     for (int j = 0; j < 8; j++) {
       if (font8x8_basic[(uint8_t)c][i] & (1 << (7 - j))) {
-        put_pixel(x + j, y + i, color);
+        my_put_pixel(x + j, y + i, color);
       }
     }
   }
@@ -193,7 +203,7 @@ void draw_image(int x, int y, int w, int h, uint8_t *data) {
       uint8_t b = (col >> 16) & 0xFF;
       uint8_t a = (col >> 24) & 0xFF;
       if (a > 128)
-        put_pixel(x + j, y + i, (r << 16) | (g << 8) | b);
+        my_put_pixel(x + j, y + i, (r << 16) | (g << 8) | b);
     }
   }
 }
@@ -214,7 +224,7 @@ void draw_image_scaled(int x, int y, int w, int h, uint8_t *data, int src_w,
       uint8_t b = (col >> 16) & 0xFF;
       uint8_t a = (col >> 24) & 0xFF;
       if (a > 128)
-        put_pixel(x + j, y + i, (r << 16) | (g << 8) | b);
+        my_put_pixel(x + j, y + i, (r << 16) | (g << 8) | b);
     }
   }
 }
@@ -227,51 +237,13 @@ void draw_wallpaper() {
       uint8_t r = col & 0xFF;
       uint8_t g = (col >> 8) & 0xFF;
       uint8_t b = (col >> 16) & 0xFF;
-      put_pixel(x, y, (r << 16) | (g << 8) | b);
+      my_put_pixel(x, y, (r << 16) | (g << 8) | b);
     }
   }
 }
 
-uint32_t mouse_bg[11][11];
 int last_mouse_x = -1;
 int last_mouse_y = -1;
-
-void save_mouse_bg(int cx, int cy) {
-  for (int i = -5; i <= 5; i++) {
-    for (int j = -5; j <= 5; j++) {
-      int px = cx + j;
-      int py = cy + i;
-      if (px >= 0 && (uint32_t)px < screen.width && py >= 0 &&
-          (uint32_t)py < screen.height) {
-        mouse_bg[i + 5][j + 5] =
-            screen.framebuffer[py * (screen.pitch / 4) + px];
-      }
-    }
-  }
-}
-
-void restore_mouse_bg(int cx, int cy) {
-  if (cx == -1 || cy == -1)
-    return;
-  for (int i = -5; i <= 5; i++) {
-    for (int j = -5; j <= 5; j++) {
-      int px = cx + j;
-      int py = cy + i;
-      if (px >= 0 && (uint32_t)px < screen.width && py >= 0 &&
-          (uint32_t)py < screen.height) {
-        screen.framebuffer[py * (screen.pitch / 4) + px] =
-            mouse_bg[i + 5][j + 5];
-      }
-    }
-  }
-}
-
-void draw_mouse() {
-  for (int i = -5; i <= 5; i++) {
-    put_pixel(mouse_x + i, mouse_y, 0xFFFFFF);
-    put_pixel(mouse_x, mouse_y + i, 0xFFFFFF);
-  }
-}
 
 void uint_to_string(uint32_t value, char *str) {
   if (value == 0) {
@@ -694,6 +666,14 @@ bool handle_window_titlebar(WinState &win, int mx, int my, bool clicked) {
 }
 
 extern "C" void start_graphical_shell() {
+  ui_buffer = (uint32_t *)malloc(screen.width * screen.height * 4);
+  frontbuffer = (uint32_t *)malloc(screen.width * screen.height * 4);
+  
+  // Initialize frontbuffer to something distinct so the first frame draws fully
+  for (uint32_t i = 0; i < screen.width * screen.height; i++) {
+    frontbuffer[i] = 0x00000000;
+  }
+
   init_minimal_font();
 
   WinState welcome = {80, 60, 640, 340, true, false, false, 0, 0};
@@ -715,19 +695,15 @@ extern "C" void start_graphical_shell() {
 
   int menu_btn_x = screen.width - 70;
 
-  // Initial draw
-  draw_all_ui(welcome, fm, calc, cs, fm_selected, fm_scroll);
-  save_mouse_bg(mouse_x, mouse_y);
-  last_mouse_x = mouse_x;
-  last_mouse_y = mouse_y;
-  draw_mouse();
+  bool first_frame = true;
 
   while (1) {
     get_keyboard_input_nonblock();
 
     bool mouse_clicked = mouse_left && !last_mouse_left_state;
     bool mouse_released = !mouse_left && last_mouse_left_state;
-    bool needs_redraw = false;
+    bool needs_redraw = first_frame;
+    first_frame = false;
 
     // --- Menu button click ---
     if (mouse_clicked) {
@@ -845,14 +821,27 @@ extern "C" void start_graphical_shell() {
       draw_all_ui(welcome, fm, calc, cs, fm_selected, fm_scroll);
       if (menu_open)
         draw_menu_dropdown();
-      save_mouse_bg(mouse_x, mouse_y);
-      draw_mouse();
-      last_mouse_x = mouse_x;
-      last_mouse_y = mouse_y;
-    } else if (mouse_x != last_mouse_x || mouse_y != last_mouse_y) {
-      restore_mouse_bg(last_mouse_x, last_mouse_y);
-      save_mouse_bg(mouse_x, mouse_y);
-      draw_mouse();
+    }
+
+    if (needs_redraw || mouse_x != last_mouse_x || mouse_y != last_mouse_y) {
+      for (int y = 0; y < (int)screen.height; y++) {
+        for (int x = 0; x < (int)screen.width; x++) {
+          uint32_t pixel = ui_buffer[y * screen.width + x];
+          
+          bool is_mouse = false;
+          if (x == mouse_x && y >= mouse_y - 5 && y <= mouse_y + 5) is_mouse = true;
+          if (y == mouse_y && x >= mouse_x - 5 && x <= mouse_x + 5) is_mouse = true;
+          
+          if (is_mouse) {
+            pixel = 0xFFFFFF;
+          }
+          
+          if (frontbuffer[y * screen.width + x] != pixel) {
+            frontbuffer[y * screen.width + x] = pixel;
+            put_pixel(x, y, pixel);
+          }
+        }
+      }
       last_mouse_x = mouse_x;
       last_mouse_y = mouse_y;
     }
