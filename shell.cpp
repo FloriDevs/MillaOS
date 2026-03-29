@@ -1186,7 +1186,7 @@ void draw_all_ui(WinState &welcome, WinState &fm, WinState &calc,
     if (!welcome.minimized) {
       draw_window(welcome.x, welcome.y, welcome.w, welcome.h, "Milla Welcome",
                   true);
-      draw_string(welcome.x + 20, welcome.y + 50, "Wellcome to Milla OS 2.0",
+      draw_string(welcome.x + 20, welcome.y + 50, "Welcome to Milla OS 2.0",
                   0x000000);
       draw_image_scaled(welcome.x + 20, welcome.y + 80, 100, 100,
                         _binary_logo1_raw_start, 1024, 1024);
