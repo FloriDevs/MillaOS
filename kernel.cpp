@@ -233,12 +233,6 @@ void print_char(int row, int col, char character, uint16_t color) {
 
 void print_string(int row, int col, const char *str, uint16_t color);
 
-// Debug Helper
-void network_debug_print(const char *msg, int col) {
-  print_string(24, col, "               ", 0x70); // Clear
-  print_string(24, col, msg, 0x74);               // Red on Grey
-}
-
 void print_string(int row, int col, const char *str, uint16_t color) {
   int i = 0;
   while (str[i] != '\0') {
@@ -253,9 +247,6 @@ void print_string_centered(int row, const char *str, uint16_t color) {
   print_string(row, col, str, color);
 }
 
-// Forward declaration
-void network_debug_print(const char *msg, int col);
-
 void clear_screen(uint16_t color) {
   uint16_t *video_memory = (uint16_t *)0xb8000;
   for (int i = 0; i < 80 * 25; ++i) {
@@ -269,6 +260,7 @@ void clear_screen(uint16_t color) {
 
 int mouse_x = 40;
 int mouse_y = 12;
+int global_mouse_speed = 2; // 0=Slowest, 1=Slow, 2=Normal, 3=Fast
 uint8_t mouse_cycle = 0;
 int8_t mouse_byte[3];
 bool mouse_left = false;
@@ -339,8 +331,10 @@ void handle_mouse_byte(uint8_t b) {
 
     int dx = (int8_t)mouse_byte[1];
     int dy = (int8_t)mouse_byte[2];
-    mouse_x += dx / 2; // Sensitivity div 2
-    mouse_y -= dy / 2; // Invert Y
+    int divisor = 4 - global_mouse_speed;
+    if (divisor < 1) divisor = 1;
+    mouse_x += dx / divisor;
+    mouse_y -= dy / divisor;
 
     if (screen.active) {
       if (mouse_x < 0)
@@ -459,921 +453,6 @@ extern "C" Time get_time() {
 }
 
 // ============================================================================
-// NETWORK UTILS & ENDIANNESS
-// ============================================================================
-
-uint16_t htons(uint16_t v) { return (v << 8) | (v >> 8); }
-uint16_t ntohs(uint16_t v) { return htons(v); }
-
-uint32_t htonl(uint32_t v) {
-  return ((v & 0xFF) << 24) | ((v & 0xFF00) << 8) | ((v & 0xFF0000) >> 8) |
-         ((v >> 24) & 0xFF);
-}
-uint32_t ntohl(uint32_t v) { return htonl(v); }
-
-// ============================================================================
-// NETWORK PROTOCOL HEADERS
-// ============================================================================
-
-struct MacAddress {
-  uint8_t addr[6];
-};
-
-struct EthernetHeader {
-  uint8_t dest[6];
-  uint8_t src[6];
-  uint16_t type;
-} __attribute__((packed));
-
-struct ARPHeader {
-  uint16_t hardware_type;
-  uint16_t protocol_type;
-  uint8_t hardware_addr_len;
-  uint8_t protocol_addr_len;
-  uint16_t opcode;
-  uint8_t src_mac[6];
-  uint32_t src_ip;
-  uint8_t dest_mac[6];
-  uint32_t dest_ip;
-} __attribute__((packed));
-
-struct IPv4Header {
-  uint8_t ihl : 4;
-  uint8_t version : 4;
-  uint8_t tos;
-  uint16_t length;
-  uint16_t id;
-  uint16_t frag_offset;
-  uint8_t ttl;
-  uint8_t protocol;
-  uint16_t checksum;
-  uint32_t src_ip;
-  uint32_t dest_ip;
-} __attribute__((packed));
-
-struct UDPHeader {
-  uint16_t src_port;
-  uint16_t dest_port;
-  uint16_t length;
-  uint16_t checksum;
-} __attribute__((packed));
-
-struct TCPHeader {
-  uint16_t src_port;
-  uint16_t dest_port;
-  uint32_t seq_num;
-  uint32_t ack_num;
-  uint8_t reserved : 4;
-  uint8_t data_offset : 4;
-  uint8_t flags;
-  uint16_t window_size;
-  uint16_t checksum;
-  uint16_t urgent_ptr;
-} __attribute__((packed));
-
-struct DNSHeader {
-  uint16_t id;
-  uint16_t flags;
-  uint16_t q_count;
-  uint16_t ans_count;
-  uint16_t auth_count;
-  uint16_t add_count;
-} __attribute__((packed));
-
-// Pseudo Header for Checksum calculation
-struct PseudoHeader {
-  uint32_t src_ip;
-  uint32_t dest_ip;
-  uint8_t reserved;
-  uint8_t protocol;
-  uint16_t tcp_udp_length;
-} __attribute__((packed));
-
-// ============================================================================
-// PCI & RTL8139 DRIVER
-// ============================================================================
-
-uint32_t pci_read_config(uint8_t bus, uint8_t slot, uint8_t func,
-                         uint8_t offset) {
-  uint32_t address;
-  uint32_t lbus = (uint32_t)bus;
-  uint32_t lslot = (uint32_t)slot;
-  uint32_t lfunc = (uint32_t)func;
-  uint32_t tmp = 0;
-
-  address = (uint32_t)((lbus << 16) | (lslot << 11) | (lfunc << 8) |
-                       (offset & 0xfc) | ((uint32_t)0x80000000));
-
-  outl(0xCF8, address);
-  tmp = (uint32_t)(inl(0xCFC));
-  return tmp;
-}
-
-void pci_write_config(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset,
-                      uint32_t value) {
-  uint32_t address;
-  uint32_t lbus = (uint32_t)bus;
-  uint32_t lslot = (uint32_t)slot;
-  uint32_t lfunc = (uint32_t)func;
-
-  address = (uint32_t)((lbus << 16) | (lslot << 11) | (lfunc << 8) |
-                       (offset & 0xfc) | ((uint32_t)0x80000000));
-
-  outl(0xCF8, address);
-  outl(0xCFC, value);
-}
-
-// RTL8139 Constants
-#define RTL8139_VENDOR_ID 0x10EC
-#define RTL8139_DEVICE_ID 0x8139
-
-uint16_t rtl8139_io_base = 0;
-uint8_t rtl8139_mac[6];
-uint8_t *rtl8139_rx_buffer = nullptr;
-uint32_t rx_buffer_offset = 0;
-uint32_t packet_counter = 0;
-uint32_t total_packets_sent = 0;
-
-// TX Buffers
-uint8_t *rtl8139_tx_buffers[4];
-uint8_t tx_cur = 0;
-
-void find_rtl8139() {
-  for (uint32_t bus = 0; bus < 256; bus++) {
-    for (uint32_t slot = 0; slot < 32; slot++) {
-      uint32_t vendor_device = pci_read_config(bus, slot, 0, 0);
-      if ((vendor_device & 0xFFFF) != 0xFFFF) {
-        uint16_t vendor = vendor_device & 0xFFFF;
-        uint16_t device = (vendor_device >> 16) & 0xFFFF;
-
-        if (vendor == RTL8139_VENDOR_ID && device == RTL8139_DEVICE_ID) {
-          // Found it! Get IO Base (BAR0)
-          uint32_t bar0 = pci_read_config(bus, slot, 0, 0x10);
-          rtl8139_io_base = bar0 & (~0x3);
-
-          // Enable Bus Mastering (Command Register offset 0x04)
-          uint32_t command = pci_read_config(bus, slot, 0, 0x04);
-          if (!(command & 0x04)) {
-            pci_write_config(bus, slot, 0, 0x04, command | 0x04);
-            print_string(24, 0, "RTL8139: Bus Mastering Enabled", 0x70);
-          } else {
-            print_string(24, 0, "RTL8139: Bus Mastering Already On", 0x70);
-          }
-        }
-      }
-    }
-  }
-}
-
-void rtl8139_send_packet(const void *data, uint32_t len) {
-  if (rtl8139_io_base == 0)
-    return;
-
-  // Use current TX buffer
-  memcpy(rtl8139_tx_buffers[tx_cur], data, len);
-
-  // Pad if smaller than 60 bytes (Ethernet min)
-  if (len < 60) {
-    memset(rtl8139_tx_buffers[tx_cur] + len, 0, 60 - len);
-    len = 60;
-  }
-
-  // Write Status (Size) | OWN bit gets cleared by controller later
-  // TSD0-3 are at 0x10, 0x14, 0x18, 0x1C
-  outl(rtl8139_io_base + 0x10 + (tx_cur * 4), len); // Write len triggers TX
-  network_debug_print("TX PKT", 40);
-
-  tx_cur = (tx_cur + 1) % 4;
-  total_packets_sent++;
-}
-
-namespace Network {
-bool connected = false;
-char status_msg[50] = "Searching...";
-
-void init() {
-  find_rtl8139();
-
-  if (rtl8139_io_base != 0) {
-    connected = true;
-    string_copy(status_msg, "RTL8139 Init OK");
-
-    // Software Reset
-    outb(rtl8139_io_base + 0x37, 0x10);
-    while ((inb(rtl8139_io_base + 0x37) & 0x10) != 0) {
-      asm volatile("nop");
-    }
-
-    // Init RX Buffer
-    rtl8139_rx_buffer = (uint8_t *)malloc(8192 + 16 + 1500);
-    outl(rtl8139_io_base + 0x30, (uint32_t)rtl8139_rx_buffer); // RBSTART
-
-    // Init TX Buffers
-    for (int i = 0; i < 4; i++) {
-      rtl8139_tx_buffers[i] = (uint8_t *)malloc(1536); // Max MTU + padding
-      outl(rtl8139_io_base + 0x20 + (i * 4),
-           (uint32_t)rtl8139_tx_buffers[i]); // TSAD0-3
-    }
-
-    // Set IMR + ISR (Enable interrupts - though we poll for now)
-    outw(rtl8139_io_base + 0x3C, 0x0005); // TOK + ROK
-    outw(rtl8139_io_base + 0x44, 0x000F); // AB + AM + APM + AAP (Promiscuous)
-
-    // Enable RX/TX
-    outb(rtl8139_io_base + 0x37, 0x0C); // RE + TE
-
-    // Read MAC
-    for (int i = 0; i < 6; i++) {
-      rtl8139_mac[i] = inb(rtl8139_io_base + i);
-    }
-
-  } else {
-    string_copy(status_msg, "No NIC Found");
-  }
-}
-
-// ----------------------------------------------------------------------------
-// ETHERNET & ARP LAYER
-// ----------------------------------------------------------------------------
-
-const uint16_t ETHERTYPE_IPv4 = 0x0800;
-const uint16_t ETHERTYPE_ARP = 0x0806;
-
-// Quick IP helper (10.0.2.15)
-uint32_t my_ip =
-    0x0F02000A; // Little Endian representation of 10.0.2.15 (Reverse bytes)
-// Actually, let's stick to Network Byte Order for structs: 10.0.2.15 ->
-// 0x0A00020F BUT, x86 is Little Endian. If I write 0x0A00020F to memory, it
-// becomes 0F 02 00 0A. So:
-uint32_t ip_addr_host = 0x0A00020F; // 10.0.2.15
-uint32_t gateway_ip = 0x0A000202;   // 10.0.2.2 (QEMU default gateway)
-
-// We need a way to set our IP if it's not hardcoded, but static is fine for
-// now.
-
-// ARP Cache
-struct ArpEntry {
-  uint32_t ip;
-  uint8_t mac[6];
-  bool valid;
-};
-ArpEntry arp_cache[4];
-
-void arp_update(uint32_t ip, const uint8_t *mac) {
-  for (int i = 0; i < 4; i++) {
-    if (arp_cache[i].valid && arp_cache[i].ip == ip) {
-      memcpy(arp_cache[i].mac, mac, 6);
-      return;
-    }
-  }
-  // Add new
-  for (int i = 0; i < 4; i++) {
-    if (!arp_cache[i].valid) {
-      arp_cache[i].ip = ip;
-      memcpy(arp_cache[i].mac, mac, 6);
-      arp_cache[i].valid = true;
-      return;
-    }
-  }
-  // Overwrite first
-  arp_cache[0].ip = ip;
-  memcpy(arp_cache[0].mac, mac, 6);
-  arp_cache[0].valid = true;
-}
-
-uint8_t *arp_resolve(uint32_t ip) {
-  for (int i = 0; i < 4; i++) {
-    if (arp_cache[i].valid && arp_cache[i].ip == ip)
-      return arp_cache[i].mac;
-  }
-  return nullptr;
-}
-
-void send_ethernet(const uint8_t *dest_mac, uint16_t type, const void *payload,
-                   uint32_t len) {
-  uint32_t total_len = sizeof(EthernetHeader) + len;
-  uint8_t *buffer = (uint8_t *)malloc(total_len);
-  if (!buffer)
-    return;
-
-  EthernetHeader *eth = (EthernetHeader *)buffer;
-  memcpy(eth->dest, dest_mac, 6);
-  memcpy(eth->src, rtl8139_mac, 6);
-  eth->type = htons(type);
-  memcpy(buffer + sizeof(EthernetHeader), payload, len);
-
-  rtl8139_send_packet(buffer, total_len);
-  free(buffer);
-}
-
-void send_arp_request(uint32_t target_ip) {
-  ARPHeader arp;
-  arp.hardware_type = htons(1); // Ethernet
-  arp.protocol_type = htons(ETHERTYPE_IPv4);
-  arp.hardware_addr_len = 6;
-  arp.protocol_addr_len = 4;
-  arp.opcode = htons(1); // Request
-  memcpy(arp.src_mac, rtl8139_mac, 6);
-  arp.src_ip = htonl(ip_addr_host); // My IP
-  memset(arp.dest_mac, 0,
-         6); // Target MAC unknown (0) or Broadcast (FF)? ARP Request dest MAC
-             // in header is Broadcast, here is ignored/0.
-  arp.dest_ip = htonl(target_ip);
-
-  uint8_t broadcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-
-  network_debug_print("TX ARP", 40);
-  send_ethernet(broadcast, ETHERTYPE_ARP, &arp, sizeof(ARPHeader));
-}
-
-void handle_arp(const uint8_t *data, uint32_t len) {
-  if (len < sizeof(ARPHeader))
-    return;
-  ARPHeader *arp = (ARPHeader *)data;
-
-  if (ntohs(arp->hardware_type) != 1 ||
-      ntohs(arp->protocol_type) != ETHERTYPE_IPv4)
-    return;
-
-  // Cache the sender
-  uint32_t sender_ip = ntohl(arp->src_ip);
-  arp_update(sender_ip, arp->src_mac);
-  network_debug_print("RX ARP", 60);
-
-  if (ntohs(arp->opcode) == 1 && ntohl(arp->dest_ip) == ip_addr_host) {
-    // ARP Request for me -> Reply
-    ARPHeader reply;
-    reply.hardware_type = htons(1);
-    reply.protocol_type = htons(ETHERTYPE_IPv4);
-    reply.hardware_addr_len = 6;
-    reply.protocol_addr_len = 4;
-    reply.opcode = htons(2); // Reply
-
-    memcpy(reply.src_mac, rtl8139_mac, 6);
-    reply.src_ip = arp->dest_ip;
-
-    memcpy(reply.dest_mac, arp->src_mac, 6);
-    reply.dest_ip = arp->src_ip;
-
-    send_ethernet(arp->src_mac, ETHERTYPE_ARP, &reply, sizeof(ARPHeader));
-  }
-}
-
-// Forward declarations
-void poll(); // From Network namespace (later in file)
-void handle_tcp(const uint8_t *data, uint32_t len, uint32_t src_ip,
-                uint32_t dest_ip);
-
-// Enum for TCP State
-enum TcpState { TCP_CLOSED, TCP_SYN_SENT, TCP_ESTABLISHED };
-TcpState tcp_state = TCP_CLOSED;
-uint32_t tcp_seq_num = 0;
-uint32_t tcp_ack_num = 0;
-uint32_t tcp_dest_ip = 0;
-uint16_t tcp_dest_port = 0;
-uint16_t tcp_src_port = 50000; // Static source port for now
-
-// TCP RX Buffer
-#define TCP_RX_BUFFER_SIZE 16384
-uint8_t tcp_rx_buffer[TCP_RX_BUFFER_SIZE];
-uint32_t tcp_rx_pos = 0;
-
-uint16_t calculate_checksum(const void *data, uint32_t len) {
-  const uint16_t *ptr = (const uint16_t *)data;
-  uint32_t sum = 0;
-  while (len > 1) {
-    sum += *ptr++;
-    len -= 2;
-  }
-  if (len) {
-    sum += *(const uint8_t *)ptr;
-  }
-  while (sum >> 16) {
-    sum = (sum & 0xFFFF) + (sum >> 16);
-  }
-  return (uint16_t)~sum;
-}
-
-void send_ipv4(uint32_t dest_ip, uint8_t protocol, const void *payload,
-               uint32_t len) {
-  uint32_t total_len = sizeof(IPv4Header) + len;
-  uint8_t *buffer = (uint8_t *)malloc(total_len);
-  if (!buffer)
-    return;
-
-  IPv4Header *ip = (IPv4Header *)buffer;
-  ip->version = 4;
-  ip->ihl = 5;
-  ip->tos = 0;
-  ip->length = htons(total_len);
-  ip->id = htons(0);               // TODO: Increment ID
-  ip->frag_offset = htons(0x4000); // Don't fragment
-  ip->ttl = 64;
-  ip->protocol = protocol;
-  ip->src_ip = htonl(ip_addr_host);
-  ip->dest_ip = htonl(dest_ip);
-  ip->checksum = 0;
-  ip->checksum = calculate_checksum(ip, sizeof(IPv4Header));
-
-  memcpy(buffer + sizeof(IPv4Header), payload, len);
-
-  // ARP Resolve
-  uint8_t *dest_mac = arp_resolve(dest_ip);
-  if (!dest_mac) {
-    send_arp_request(dest_ip);
-    free(buffer);
-    return;
-  }
-
-  send_ethernet(dest_mac, ETHERTYPE_IPv4, buffer, total_len);
-  free(buffer);
-}
-
-void tcp_send_packet(uint32_t dest_ip, uint16_t dest_port, uint8_t flags,
-                     const uint8_t *payload, uint32_t len) {
-  uint32_t total_len = sizeof(TCPHeader) + len;
-  uint8_t *buffer = (uint8_t *)malloc(total_len);
-  if (!buffer)
-    return;
-
-  TCPHeader *tcp = (TCPHeader *)buffer;
-  tcp->src_port = htons(tcp_src_port);
-  tcp->dest_port = htons(dest_port);
-  tcp->seq_num = htonl(tcp_seq_num);
-  tcp->ack_num = htonl(tcp_ack_num);
-  tcp->reserved = 0;
-  tcp->data_offset = 5; // 5 * 32-bit words = 20 bytes
-  tcp->flags = flags;
-  tcp->window_size = htons(8192);
-  tcp->checksum = 0;
-  tcp->urgent_ptr = 0;
-
-  if (len > 0) {
-    memcpy(buffer + sizeof(TCPHeader), payload, len);
-  }
-
-  // Pseudo Header Checksum
-  PseudoHeader ph;
-  ph.src_ip = htonl(ip_addr_host);
-  ph.dest_ip = htonl(dest_ip);
-  ph.reserved = 0;
-  ph.protocol = 6; // TCP
-  ph.tcp_udp_length = htons(total_len);
-
-  uint32_t sum = 0;
-  // Manual sum of PseudoHeader to avoid packed pointer alignment issues
-  sum += (ph.src_ip & 0xFFFF);
-  sum += (ph.src_ip >> 16);
-  sum += (ph.dest_ip & 0xFFFF);
-  sum += (ph.dest_ip >> 16);
-  sum += htons(ph.protocol); // Protocol is 8-bit but in 16-bit word 0006
-  sum += ph.tcp_udp_length;
-
-  uint16_t *ptr = (uint16_t *)buffer;
-  for (int i = 0; i < total_len / 2; i++) {
-    sum += ptr[i];
-  }
-  if (total_len & 1) {
-    sum += buffer[total_len - 1] & 0xFF;
-  }
-  while (sum >> 16)
-    sum = (sum & 0xFFFF) + (sum >> 16);
-  tcp->checksum = ~sum;
-
-  send_ipv4(dest_ip, 6, buffer, total_len);
-  free(buffer);
-
-  // Increment Sequence Number if SYN or FIN or Data
-  if ((flags & 0x02) || (flags & 0x01) || len > 0) { // SYN or FIN or payload
-    tcp_seq_num += (len > 0 ? len : 1);
-  }
-}
-
-void handle_tcp(const uint8_t *data, uint32_t len, uint32_t src_ip,
-                uint32_t dest_ip) {
-  if (len < sizeof(TCPHeader))
-    return;
-  TCPHeader *tcp = (TCPHeader *)data;
-
-  // Very basic check logic
-  if (ntohs(tcp->dest_port) != tcp_src_port) {
-    network_debug_print("TCP PORT DROP", 60);
-    return;
-  }
-
-  uint32_t seq = ntohl(tcp->seq_num);
-  uint32_t ack = ntohl(tcp->ack_num);
-  uint8_t flags = tcp->flags;
-
-  // Calculate Payload
-  uint8_t offset = tcp->data_offset * 4;
-  uint32_t payload_len = len - offset;
-  const uint8_t *payload = data + offset;
-
-  if (tcp_state == TCP_SYN_SENT) {
-    if ((flags & 0x12) == 0x12) { // SYN + ACK
-      network_debug_print("RX SYN-ACK", 60);
-      tcp_ack_num = seq + 1;
-      tcp_seq_num = ack; // Server ACKed our SYN
-      tcp_state = TCP_ESTABLISHED;
-
-      // Send ACK
-      tcp_send_packet(src_ip, ntohs(tcp->src_port), 0x10, nullptr, 0); // ACK
-    }
-  } else if (tcp_state == TCP_ESTABLISHED) {
-    // Handle PUSH/DATA
-    if (payload_len > 0) {
-      // Store data
-      if (tcp_rx_pos + payload_len < TCP_RX_BUFFER_SIZE) {
-        memcpy(tcp_rx_buffer + tcp_rx_pos, payload, payload_len);
-        tcp_rx_pos += payload_len;
-      }
-
-      tcp_ack_num = seq + payload_len;
-      // Send ACK (Ack the data)
-      tcp_send_packet(src_ip, ntohs(tcp->src_port), 0x10, nullptr, 0); // ACK
-
-      // If PSH flag is set, maybe we should notify app?
-      // For now blocking poll handles it.
-    }
-
-    // Handle FIN
-    if (flags & 0x01) { // FIN
-      tcp_ack_num = seq + 1;
-      tcp_send_packet(src_ip, ntohs(tcp->src_port), 0x11, nullptr,
-                      0); // FIN + ACK
-      tcp_state = TCP_CLOSED;
-    }
-  }
-}
-
-bool http_get(const char *url_str, char *output_buffer, int max_len) {
-  // 1. URL Parsing
-  // Defaults
-  uint32_t ip = 0;
-  tcp_dest_port = 80;
-  char path[128];
-  string_copy(path, "/");
-  char host[128];
-  memset(host, 0, 128);
-
-  const char *work_str = url_str;
-  // Skip protocol if present
-  if (string_compare(work_str, "http://") ||
-      (work_str[0] == 'h' && work_str[1] == 't' && work_str[2] == 't' &&
-       work_str[3] == 'p' && work_str[4] == ':' && work_str[5] == '/' &&
-       work_str[6] == '/')) {
-    work_str += 7;
-  }
-
-  // Extract Host
-  int h = 0;
-  int i = 0;
-  while (work_str[i] != '\0' && work_str[i] != ':' && work_str[i] != '/') {
-    if (h < 127)
-      host[h++] = work_str[i];
-    i++;
-  }
-  host[h] = '\0';
-
-  // Parse IP or Localhost
-  bool is_localhost = false;
-  // Simple check for "localhost"
-  if (work_str[0] == 'l' && work_str[1] == 'o' && work_str[2] == 'c' &&
-      work_str[3] == 'a' && work_str[4] == 'l' && work_str[5] == 'h' &&
-      work_str[6] == 'o' && work_str[7] == 's' && work_str[8] == 't') {
-    is_localhost = true;
-  }
-
-  if (is_localhost) {
-    ip = 0x0A000202; // 10.0.2.2 (QEMU Host)
-  } else {
-    // Basic IP Parsing (X.X.X.X)
-    int part = 0;
-    int shift = 24;
-    for (int k = 0; host[k] != '\0'; k++) {
-      if (host[k] == '.') {
-        ip |= (part << shift);
-        shift -= 8;
-        part = 0;
-      } else {
-        part = part * 10 + (host[k] - '0');
-      }
-    }
-    ip |= part;
-  }
-
-  // Parse Port
-  if (work_str[i] == ':') {
-    i++;
-    int p = 0;
-    while (work_str[i] >= '0' && work_str[i] <= '9') {
-      p = p * 10 + (work_str[i] - '0');
-      i++;
-    }
-    if (p > 0)
-      tcp_dest_port = p;
-  }
-
-  // Parse Path
-  if (work_str[i] == '/') {
-    int p_i = 0;
-    while (work_str[i] != '\0' && p_i < 127) {
-      path[p_i++] = work_str[i++];
-    }
-    path[p_i] = '\0';
-  }
-
-  tcp_dest_ip = ip;
-  tcp_state = TCP_CLOSED;
-  tcp_seq_num = 1000;
-  tcp_ack_num = 0;
-  tcp_rx_pos = 0;
-  tcp_src_port++;
-
-  // 2. Handshake
-  char status[50];
-  string_copy(status, "Connecting...");
-
-  tcp_send_packet(tcp_dest_ip, tcp_dest_port, 0x02, nullptr, 0); // SYN
-  tcp_state = TCP_SYN_SENT;
-
-  // Timeout - 30 Seconds
-  Time start_time = get_time();
-  int start_sec =
-      start_time.hour * 3600 + start_time.minute * 60 + start_time.second;
-  int last_retry_sec = start_sec;
-  int polls = 0;
-
-  while (tcp_state != TCP_ESTABLISHED) {
-    poll();
-    polls++;
-    // Check time every ~10000 polls
-    if ((polls % 10000) == 0) {
-      Time now = get_time();
-      int now_sec = now.hour * 3600 + now.minute * 60 + now.second;
-      if (now_sec < start_sec)
-        now_sec += 24 * 3600; // Day wrap
-
-      if ((now_sec - start_sec) >= 30)
-        break;
-
-      // Retry SYN every 1 second
-      if ((now_sec - last_retry_sec) >= 1) {
-        if (tcp_state == TCP_SYN_SENT) {
-          // Reuse same sequence number (undo increment from previous send)
-          tcp_seq_num--;
-          tcp_send_packet(tcp_dest_ip, tcp_dest_port, 0x02, nullptr, 0); // SYN
-          network_debug_print("RETRY SYN", 40);
-          last_retry_sec = now_sec;
-        }
-      }
-    }
-  }
-
-  if (tcp_state != TCP_ESTABLISHED) {
-    string_copy(output_buffer, "Connection Timeout (30s).");
-    return false;
-  }
-
-  // 3. Send HTTP GET
-  char request[256];
-  // Simple memset
-  for (int k = 0; k < 256; k++)
-    request[k] = 0;
-
-  // Construct Request: GET [path] HTTP/1.0\r\nHost: [host]\r\n\r\n
-  // Note: We don't have sprintf, so manual construction
-  string_copy(request, "GET ");
-
-  // Append Path
-  int len = string_length(request);
-  for (int k = 0; path[k] != '\0'; k++)
-    request[len++] = path[k];
-
-  // Append HTTP/1.0...
-  const char *mid = " HTTP/1.0\r\nHost: ";
-  for (int k = 0; mid[k] != '\0'; k++)
-    request[len++] = mid[k];
-
-  // Append Host
-  for (int k = 0; host[k] != '\0'; k++)
-    request[len++] = host[k];
-
-  // Append End
-  request[len++] = '\r';
-  request[len++] = '\n';
-  request[len++] = '\r';
-  request[len++] = '\n';
-  request[len] = '\0';
-
-  tcp_send_packet(tcp_dest_ip, tcp_dest_port, 0x18, (uint8_t *)request, len);
-
-  // 4. Wait for Data
-  // Also 30s timeout for data? Or keep large loop? User asked for "connection
-  // timeout". But let's be generous with data too.
-  int data_timeout_loops =
-      50000000; // Just a very large number for safety alongside time check
-  Time data_start = get_time();
-  int data_start_sec =
-      data_start.hour * 3600 + data_start.minute * 60 + data_start.second;
-
-  int last_len = 0;
-  int same_len_ticks = 0;
-
-  while (tcp_state == TCP_ESTABLISHED) {
-    poll();
-    data_timeout_loops--;
-
-    if ((data_timeout_loops % 10000) == 0) {
-      Time now = get_time();
-      int now_sec = now.hour * 3600 + now.minute * 60 + now.second;
-      if (now_sec < data_start_sec)
-        now_sec += 24 * 3600;
-      if ((now_sec - data_start_sec) >= 30)
-        break;
-    }
-
-    if (tcp_rx_pos > 0) {
-      if (tcp_rx_pos == last_len) {
-        same_len_ticks++;
-        if (same_len_ticks > 200000) // Stabilized
-          break;
-      } else {
-        same_len_ticks = 0;
-        last_len = tcp_rx_pos;
-      }
-    }
-
-    // Safety break on loop counter to prevent infinite hang if time breaks
-    if (data_timeout_loops <= 0)
-      break;
-  }
-
-  // Copy result
-  if (tcp_rx_pos > 0) {
-    if (tcp_rx_pos >= max_len)
-      tcp_rx_pos = max_len - 1;
-    memcpy(output_buffer, tcp_rx_buffer, tcp_rx_pos);
-    output_buffer[tcp_rx_pos] = '\0';
-  } else {
-    string_copy(output_buffer, "No Data Received / Empty");
-  }
-
-  // Close
-  tcp_send_packet(tcp_dest_ip, tcp_dest_port, 0x11, nullptr, 0); // FIN+ACK
-  tcp_state = TCP_CLOSED;
-
-  return true;
-}
-
-void handle_ipv4(const uint8_t *data, uint32_t len) {
-  if (len < sizeof(IPv4Header))
-    return;
-  IPv4Header *ip = (IPv4Header *)data;
-
-  if (ip->version != 4)
-    return;
-  // Check Dest IP
-  if (ntohl(ip->dest_ip) != ip_addr_host) {
-    network_debug_print("IP DROP", 60);
-    // debug hex?
-    // we can't easily print hex args here without sprintf
-    return; // Not for us
-  }
-
-  uint16_t header_len = ip->ihl * 4;
-  uint16_t total_len = ntohs(ip->length);
-
-  if (total_len > len)
-    return; // Fragmented or cut off?
-
-  uint8_t protocol = ip->protocol;
-  uint32_t src_ip = ntohl(ip->src_ip);
-  // uint32_t dest_ip = ntohl(ip->dest_ip);
-
-  // Payload
-  const uint8_t *payload = data + header_len;
-  uint32_t payload_len = total_len - header_len;
-
-  if (protocol == 6) { // TCP
-    handle_tcp(payload, payload_len, src_ip, ip_addr_host);
-  } // else if (protocol == 1) { handle_icmp... }
-}
-
-void handle_packet(const uint8_t *data, uint32_t len) {
-  if (len < sizeof(EthernetHeader))
-    return;
-  EthernetHeader *eth = (EthernetHeader *)data;
-
-  uint16_t type = ntohs(eth->type);
-
-  if (type == ETHERTYPE_ARP) {
-    handle_arp(data + sizeof(EthernetHeader), len - sizeof(EthernetHeader));
-  } else if (type == ETHERTYPE_IPv4) {
-    handle_ipv4(data + sizeof(EthernetHeader), len - sizeof(EthernetHeader));
-  }
-}
-
-// Poll for new packets
-void poll() {
-  if (!connected)
-    return;
-
-  uint8_t cmd = inb(rtl8139_io_base + 0x37);
-  if ((cmd & 0x01) == 0)
-    return; // Buffer empty
-
-  network_debug_print("RX EVENT", 60);
-
-  // Simple ring buffer check (very basic)
-  // Check Interrupt Status Register
-  // Trust Command Register Buffer Empty bit (Bit 0)
-  // If bit 0 is 0, buffer is empty.
-
-  while ((inb(rtl8139_io_base + 0x37) & 0x01) == 0) { // Buffer NOT empty
-    uint8_t *packet = rtl8139_rx_buffer + rx_buffer_offset;
-    uint16_t status = *(uint16_t *)(packet);
-    uint16_t len = *(uint16_t *)(packet + 2);
-
-    // Basic Status Check
-    if (status & 1) { // ROK
-      // Data starts at offset 4
-      // Exclude CRC (4 bytes) from length? Typically len includes header(4) +
-      // packet + crc(4). RTL8139 Packet: [Header 4 bytes] [Packet Data (len -
-      // 4)] [CRC 4 bytes] Actually the length in the header is the length of
-      // the packet including CRC. We pass start of Packet Data.
-      if (len > 4 && len < 2000) { // Sanity check
-        // Inspect EtherType
-        uint8_t *p_data = packet + 4;
-        uint16_t eth_type = (p_data[12] << 8) | p_data[13];
-        if (eth_type == 0x0806)
-          network_debug_print("RX ARP PKT", 60);
-        else if (eth_type == 0x0800)
-          network_debug_print("RX IP PKT", 60);
-        else
-          network_debug_print("RX UNK", 60);
-
-        handle_packet(packet + 4, len - 4);
-      }
-    }
-
-    rx_buffer_offset = (rx_buffer_offset + len + 4 + 3) & ~3;
-    if (rx_buffer_offset >= 8192)
-      rx_buffer_offset = 0; // Wrap around (simplified)
-
-    outw(rtl8139_io_base + 0x38, rx_buffer_offset - 16); // CAPR
-  }
-  // Acknowledge all interrupts purely for safety
-  outw(rtl8139_io_base + 0x3E, 0xFFFF);
-}
-
-const char *fetch(const char *url) {
-  poll();
-  // Return stats instead of content for now
-  static char buf[200];
-  string_copy(buf, "Network Statistics:\n");
-  // Add Packet count
-  int len = string_length(buf);
-  buf[len++] = 'P';
-  buf[len++] = 'k';
-  buf[len++] = 't';
-  buf[len++] = 's';
-  buf[len++] = ':';
-  buf[len++] = ' ';
-  // Simple itoa
-  if (packet_counter == 0)
-    buf[len++] = '0';
-  else {
-    int tmp = packet_counter;
-    // Quick hack for single digit (or more roughly)
-    if (tmp >= 100)
-      buf[len++] = '9'; // cap visual
-    else if (tmp >= 10)
-      buf[len++] = '0' + (tmp / 10);
-    buf[len++] = '0' + (tmp % 10);
-  }
-  buf[len++] = '\n';
-  buf[len++] = 'M';
-  buf[len++] = 'A';
-  buf[len++] = 'C';
-  buf[len++] = ':';
-  buf[len++] = ' ';
-
-  for (int i = 0; i < 6; i++) {
-    uint8_t val = rtl8139_mac[i];
-    uint8_t h = (val >> 4) & 0xF;
-    uint8_t l = val & 0xF;
-    buf[len++] = (h < 10) ? '0' + h : 'A' + (h - 10);
-    buf[len++] = (l < 10) ? '0' + l : 'A' + (l - 10);
-    if (i < 5)
-      buf[len++] = ':';
-  }
-
-  buf[len] = '\0';
-  return buf;
-}
-} // namespace Network
 
 // Dummy-Struktur, um FAT-Treiber-Signatur anzupassen
 struct ATADevice {
@@ -1391,9 +470,9 @@ ATADevice *active_disk = nullptr; // Zeigt auf die RAM-Disk
 const size_t RAMDISK_SIZE_BYTES = 800 * 1024; // 800KB
 const size_t RAMDISK_SIZE_SECTORS = RAMDISK_SIZE_BYTES / 512;
 uint8_t *ramdisk_storage = nullptr; // Zeiger auf den Speicher der RAM-Disk
-ATADevice ramdisk_device;       // Ein virtuelles ATADevice für die RAM-Disk
-#define RAMDISK_MAGIC_IO 0xDEAD // Eindeutige ID statt I/O-Port
-#define SECTOR_SIZE 512         // Definiert hier, da es global genutzt wird
+ATADevice ramdisk_device;           // Ein virtuelles ATADevice für die RAM-Disk
+#define RAMDISK_MAGIC_IO 0xDEAD     // Eindeutige ID statt I/O-Port
+#define SECTOR_SIZE 512             // Definiert hier, da es global genutzt wird
 // +++ ENDE RAM-DISK IMPLEMENTIERUNG +++
 
 // ============================================================================
@@ -2255,15 +1334,22 @@ const char scancode_map_de_shift[] = {
     'X', 'C', 'V', 'B',        'N',        'M',        ';', ':',  '_',
     0,   0,   0,   ' '};
 const char scancode_map_fr[] = {
-    0,   0,   '&', (char)0xE9, '"', '\'', '(', '-', (char)0xE8, '_', (char)0xE7, (char)0xE0, ')', '=',  0,
-    0,   'a', 'z', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p',  '^', '$', 0,    0,
-    'q', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', 'm', (char)0xF9, '*', 0,   '\\', 'w',
-    'x', 'c', 'v', 'b', 'n', ',', ';', ':', '!', 0,   0,    0,   ' '};
+    0,          0,   '&',        (char)0xE9, '"', '\'', '(', '-',
+    (char)0xE8, '_', (char)0xE7, (char)0xE0, ')', '=',  0,   0,
+    'a',        'z', 'e',        'r',        't', 'y',  'u', 'i',
+    'o',        'p', '^',        '$',        0,   0,    'q', 's',
+    'd',        'f', 'g',        'h',        'j', 'k',  'l', 'm',
+    (char)0xF9, '*', 0,          '\\',       'w', 'x',  'c', 'v',
+    'b',        'n', ',',        ';',        ':', '!',  0,   0,
+    0,          ' '};
 const char scancode_map_fr_shift[] = {
-    0,   0,   '1', '2', '3', '4', '5', '6', '7', '8', '9',  '0', '\0', '+', 0,
-    0,   'A', 'Z', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', (char)0xA8, (char)0xA3, 0,   0,
-    'Q', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', 'M', '%',  (char)0xB5, 0,  '|', 'W',
-    'X', 'C', 'V', 'B', 'N', '?', '.', '/', (char)0xA7, 0,  0,    0,   ' '};
+    0,          0,   '1', '2',  '3', '4',        '5', '6', '7',
+    '8',        '9', '0', '\0', '+', 0,          0,   'A', 'Z',
+    'E',        'R', 'T', 'Y',  'U', 'I',        'O', 'P', (char)0xA8,
+    (char)0xA3, 0,   0,   'Q',  'S', 'D',        'F', 'G', 'H',
+    'J',        'K', 'L', 'M',  '%', (char)0xB5, 0,   '|', 'W',
+    'X',        'C', 'V', 'B',  'N', '?',        '.', '/', (char)0xA7,
+    0,          0,   0,   ' '};
 
 const char *current_scancode_map = scancode_map_us;
 const char *current_scancode_map_shift = scancode_map_us_shift;
@@ -2332,51 +1418,57 @@ extern "C" void shell_set_language(int lang) {
   }
 }
 
-extern "C" bool shell_read_file(const char *filename, char *buffer, uint32_t max_size) {
+extern "C" bool shell_read_file(const char *filename, char *buffer,
+                                uint32_t max_size) {
   int file_idx = find_file(filename);
   if (file_idx != -1 && fs_mounted && active_disk) {
-      return read_file(active_disk, file_cache[file_idx].first_cluster, buffer, max_size);
+    return read_file(active_disk, file_cache[file_idx].first_cluster, buffer,
+                     max_size);
   }
   return false;
 }
 
-extern "C" bool shell_write_file(const char *filename, const char *data, uint32_t size) {
+extern "C" bool shell_write_file(const char *filename, const char *data,
+                                 uint32_t size) {
   if (fs_mounted && active_disk) {
-      bool res = write_file(active_disk, filename, data, size);
-      if (res) read_directory(active_disk, root_dir_first_cluster);
-      return res;
+    bool res = write_file(active_disk, filename, data, size);
+    if (res)
+      read_directory(active_disk, root_dir_first_cluster);
+    return res;
   }
   return false;
 }
 
 extern "C" bool shell_format_disk(int disk_id) {
-  ATADevice *disk = disk_id == 1 ? &ramdisk_device : (hdd_device.present ? &hdd_device : nullptr);
+  ATADevice *disk = disk_id == 1 ? &ramdisk_device
+                                 : (hdd_device.present ? &hdd_device : nullptr);
   if (disk) {
-      return format_fat16(disk, 0, disk->size_sectors);
+    return format_fat16(disk, 0, disk->size_sectors);
   }
   return false;
 }
 
 extern "C" bool shell_mount_disk(int disk_id) {
-  ATADevice *disk = disk_id == 1 ? &ramdisk_device : (hdd_device.present ? &hdd_device : nullptr);
+  ATADevice *disk = disk_id == 1 ? &ramdisk_device
+                                 : (hdd_device.present ? &hdd_device : nullptr);
   if (disk) {
-      if (mount_fat16(disk, 0)) {
-          active_disk = disk;
-          read_directory(active_disk, root_dir_first_cluster);
-          return true;
+    if (mount_fat16(disk, 0)) {
+      active_disk = disk;
+      read_directory(active_disk, root_dir_first_cluster);
+      return true;
+    }
+    if (disk == &hdd_device && ata_read_sector(disk, 0, sector_buffer)) {
+      MBR *mbr = (MBR *)sector_buffer;
+      for (int i = 0; i < 4; i++) {
+        if (mbr->partitions[i].total_sectors > 0) {
+          if (mount_fat16(disk, mbr->partitions[i].start_lba)) {
+            active_disk = disk;
+            read_directory(active_disk, root_dir_first_cluster);
+            return true;
+          }
+        }
       }
-      if (disk == &hdd_device && ata_read_sector(disk, 0, sector_buffer)) {
-         MBR *mbr = (MBR *)sector_buffer;
-         for (int i = 0; i < 4; i++) {
-           if (mbr->partitions[i].total_sectors > 0) {
-             if (mount_fat16(disk, mbr->partitions[i].start_lba)) {
-               active_disk = disk;
-               read_directory(active_disk, root_dir_first_cluster);
-               return true;
-             }
-           }
-         }
-      }
+    }
   }
   return false;
 }
@@ -2387,14 +1479,14 @@ extern "C" void shell_unmount_disk() {
 }
 
 extern "C" int shell_get_active_disk() {
-  if (active_disk == &ramdisk_device) return 1;
-  if (active_disk == &hdd_device) return 2;
+  if (active_disk == &ramdisk_device)
+    return 1;
+  if (active_disk == &hdd_device)
+    return 2;
   return 0;
 }
 
-extern "C" bool shell_is_hdd_present() {
-  return hdd_device.present;
-}
+extern "C" bool shell_is_hdd_present() { return hdd_device.present; }
 
 // ============================================================================
 // SIMULIERTER C++ PROGRAMM-LADER
@@ -2959,94 +2051,6 @@ void calculator() {
   }
 }
 
-// ============================================================================
-// EINSTELLUNGEN
-// ============================================================================
-
-void network_status_page() {
-  clear_screen(0x03);
-  draw_window(5, 15, 14, 50, " Network Status ", 0x0B);
-
-  print_string(7, 18, "Status: ", 0x70);
-  print_string(7, 30, Network::connected ? "Online" : "Offline",
-               Network::connected ? 0x0A : 0x0C);
-
-  char buf[50];
-
-  // MAC
-  print_string(9, 18, "MAC Address:", 0x70);
-  char mac_str[20];
-  // Format MAC
-  int pos = 0;
-  for (int i = 0; i < 6; i++) {
-    uint8_t val = rtl8139_mac[i];
-    uint8_t h = (val >> 4) & 0xF;
-    uint8_t l = val & 0xF;
-    mac_str[pos++] = (h < 10) ? '0' + h : 'A' + (h - 10);
-    mac_str[pos++] = (l < 10) ? '0' + l : 'A' + (l - 10);
-    if (i < 5)
-      mac_str[pos++] = ':';
-  }
-  mac_str[pos] = '\0';
-  print_string(10, 18, mac_str, 0x0F);
-
-  // IP
-  print_string(12, 18, "IP Address:", 0x70);
-  // manual ip to string (Host Byte Order: 0A 00 02 0F -> 10.0.2.15)
-  // My ip_addr_host is 0x0A00020F (Big Endian stored in u32? No I defined it as
-  // hex literal 0x0A00020F) 0x0A = 10.
-  // So shift logic:
-  pos = 0;
-  uint32_t ip = Network::ip_addr_host;
-
-  for (int i = 0; i < 4; i++) {
-    int octet = (ip >> (24 - i * 8)) & 0xFF;
-    // itoa
-    if (octet >= 100) {
-      mac_str[pos++] = '0' + (octet / 100);
-      octet %= 100;
-      if (octet < 10)
-        mac_str[pos++] = '0';
-    }
-    if (octet >= 10) {
-      mac_str[pos++] = '0' + (octet / 10);
-      octet %= 10;
-    }
-    mac_str[pos++] = '0' + octet;
-    if (i < 3)
-      mac_str[pos++] = '.';
-  }
-  mac_str[pos] = '\0';
-  print_string(13, 18, mac_str, 0x0F);
-
-  // Packets
-  print_string(15, 18, "Packets RX: ", 0x70);
-  // Simple int to str
-  int n = packet_counter;
-  mac_str[0] = '0' + (n / 1000) % 10;
-  mac_str[1] = '0' + (n / 100) % 10;
-  mac_str[2] = '0' + (n / 10) % 10;
-  mac_str[3] = '0' + n % 10;
-  mac_str[4] = '\0';
-  print_string(15, 30, mac_str, 0x0E);
-
-  print_string(16, 18, "Packets TX: ", 0x70);
-  n = total_packets_sent;
-  mac_str[0] = '0' + (n / 1000) % 10;
-  mac_str[1] = '0' + (n / 100) % 10;
-  mac_str[2] = '0' + (n / 10) % 10;
-  mac_str[3] = '0' + n % 10;
-  mac_str[4] = '\0';
-  print_string(16, 30, mac_str, 0x0E);
-
-  print_string_centered(24, "Press ESC to Back", 0x70);
-
-  while (1) {
-    if (get_keyboard_input() == 0x01)
-      break;
-  }
-}
-
 void disk_management() {
   bool running = true;
   int selected_dev = 0; // 0=RAM, 1=HDD
@@ -3201,10 +2205,10 @@ void settings() {
     draw_window(5, 20, 18, 40, " Settings ", 0x0D);
 
     const char *opts[] = {"1. Toggle Wallpaper", "2. Keyboard Layout",
-                          "3. Network Status", "4. Disk Management", "5. Exit"};
+                          "3. Disk Management", "4. Exit"};
 
     // Draw Options
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 4; i++) {
       uint16_t col = (selected == i) ? 0x0F : 0x07;
       print_string(8 + i * 2, 22, opts[i], col);
 
@@ -3220,15 +2224,10 @@ void settings() {
         else
           print_string(10, 50, "[US]", 0x0E);
       } else if (i == 2) {
-        if (Network::connected)
-          print_string(12, 50, "[OK]", 0x0A);
-        else
-          print_string(12, 50, "[NO]", 0x0C);
-      } else if (i == 3) {
         if (active_disk == &ramdisk_device)
-          print_string(14, 50, "[RAM]", 0x0E);
+          print_string(12, 50, "[RAM]", 0x0E);
         else if (active_disk == &hdd_device)
-          print_string(14, 50, "[HDD]", 0x0E);
+          print_string(12, 50, "[HDD]", 0x0E);
       }
     }
 
@@ -3254,27 +2253,15 @@ void settings() {
           current_scancode_map_shift = scancode_map_de_shift;
         }
       } else if (selected == 2) {
-        // Network Info Popup
-        draw_window(8, 15, 12, 50, " Network Info ", 0x09);
-        print_string(10, 18, "MAC: ", 0x0F);
-        char mac_buf[20];
-        if (Network::connected)
-          print_string(12, 18, "Status: Connected", 0x0A);
-        else
-          print_string(12, 18, "Status: Disconnected", 0x0C);
-
-        print_string(16, 18, "Press any key...", 0x07);
-        get_keyboard_input();
-      } else if (selected == 3) {
         disk_management();
-      } else if (selected == 4) {
+      } else if (selected == 3) {
         running = false;
       }
     } else if (sc == 0x48) { // Up
       if (selected > 0)
         selected--;
     } else if (sc == 0x50) { // Down
-      if (selected < 4)
+      if (selected < 3)
         selected++;
     }
   }
@@ -3340,99 +2327,6 @@ void get_string_input(int row, int col, int width, const char *prompt,
 
   // Bereinige den Eingabebereich (stelle Menühintergrund wieder her)
   // (Wird durch das Neuzeichnen des Menüs in main_menu erledigt)
-}
-
-// ============================================================================
-// BROWSER APPLICATION
-// ============================================================================
-
-// Browser Content Buffer
-char browser_content[80 * 20 + 1024]; // Small buffer for rendering
-
-void browser() {
-  clear_screen(0x1F);
-
-  draw_window(0, 0, 3, 80, " Milla Browser v1.1 ", 0x1E);
-  print_string(1, 2, "URL/IP:", 0x1E);
-
-  char url_buffer[128];
-  memset(url_buffer, 0, 128);
-  string_copy(url_buffer, "localhost:8000/index.txt");
-
-  // Address bar styling
-  for (int i = 0; i < 60; i++)
-    print_char(1, 10 + i, ' ', 0x70);
-  print_string(1, 10, url_buffer, 0x70);
-
-  // Content area
-  for (int i = 3; i < 24; i++) {
-    for (int j = 0; j < 80; j++)
-      print_char(i, j, ' ', 0x0F);
-  }
-
-  print_string(24, 0, " F1: Go/Load  F2: Edit IP  ESC: Exit ", 0x70);
-
-  bool running = true;
-  bool needs_redraw = false;
-
-  while (running) {
-    if (needs_redraw) {
-      // Clear content area
-      for (int i = 3; i < 24; i++) {
-        for (int j = 0; j < 80; j++)
-          print_char(i, j, ' ', 0x0F);
-      }
-      // Render text in browser_content
-      int row = 4;
-      int col = 2;
-      for (int i = 0; browser_content[i] != '\0' && row < 23; i++) {
-        char c = browser_content[i];
-        if (c == '\n') {
-          row++;
-          col = 2;
-        } else if (c == '\r') {
-        } else {
-          print_char(row, col, c, 0x0F);
-          col++;
-          if (col > 78) {
-            row++;
-            col = 2;
-          }
-        }
-      }
-      needs_redraw = false;
-    }
-
-    uint8_t input = get_keyboard_input();
-
-    if (input == 0x01) { // ESC
-      running = false;
-    } else if (input == 0x3B) { // F1 (Go)
-      print_string(1, 72, "Loading", 0x4E);
-
-      if (Network::http_get(url_buffer, browser_content,
-                            sizeof(browser_content))) {
-        print_string(1, 72, "Done   ", 0x2A);
-      } else {
-        print_string(1, 72, "Error  ", 0x4C);
-      }
-      needs_redraw = true;
-
-    } else if (input == 0x3C) { // F2 (Addr Bar)
-      get_string_input(1, 10, 60, "", url_buffer, 128);
-      print_string(1, 10, url_buffer, 0x70);
-    }
-
-    // Background poll for incoming packets (packet counter etc)
-    Network::poll();
-
-    // Update Stats in corner
-    // char stats[10];
-    // stats[0] = 'R'; stats[1] = ':';
-    // int n = Network::packet_counter % 10;
-    // stats[2] = '0'+n;
-    // ...
-  }
 }
 
 // ============================================================================
@@ -4432,11 +3326,10 @@ void main_menu() {
 
   // **GEÄNDERT: Menüpunkte**
   const char *menu_items[] = {
-      "1. File Manager",     "2. Doc Writer", "3. Calculator",
-      "4. Internet Browser", "5. Milla Lang", "6. Milla IDE",
-      "7. Solitaire",        "8. Settings",   "9. Exit to MTop"};
+      "1. File Manager", "2. Doc Writer", "3. Calculator", "4. Milla Lang",
+      "5. Milla IDE",    "6. Solitaire",  "7. Settings",   "8. Exit to MTop"};
 
-  const int NUM_ITEMS = 9;
+  const int NUM_ITEMS = 8;
 
   int selected = 0;
   bool running = true;
@@ -4509,12 +3402,9 @@ void main_menu() {
         calculator();
         break;
       case 3:
-        browser();
-        break;
-      case 4:
         milla_lang();
         break;
-      case 5:
+      case 4:
         // IDE Launch from menu (already handled above in full logic but
         // previous chunk missed case 5 label in this snippet) Wait, I need to
         // match properly.
@@ -4539,13 +3429,13 @@ void main_menu() {
           milla_ide(filename_buffer);
         }
         break;
-      case 6:
+      case 5:
         solitaire();
         break;
-      case 7:
+      case 6:
         settings();
         break;
-      case 8:
+      case 7:
         running = false;
         break;
       }
@@ -4584,19 +3474,6 @@ void MTop() {
 
   // WIDGET: Stats
   print_string(0, 30, "RAM: 1MB", 0x1E);
-  char net_str[20];
-
-  string_copy(net_str, Network::connected ? "NET: ON " : "NET: OFF");
-  if (Network::connected) {
-    // Show last byte of MAC as indicator
-    int len = string_length(net_str);
-    net_str[len - 1] = ' '; // clear space
-    uint8_t val = rtl8139_mac[5];
-    net_str[len++] = ' ';
-    net_str[len++] = (val < 10) ? '0' + val : 'A' + (val - 10);
-    net_str[len] = '\0';
-  }
-  print_string(0, 20, net_str, Network::connected ? 0x1A : 0x1C);
 
   draw_window(3, 10, 12, 60, " MTOP ", 0x0B);
   print_string(5, 15, "Welcome to Milla OS!", 0x70);
@@ -4758,13 +3635,12 @@ extern "C" void kernel_main(uint32_t magic, multiboot_info *info) {
     // For now, let's just clear the screen to a modern dark grey
     // Clear screen efficiently
     if (screen.framebuffer) {
-        uint32_t total_pixels = screen.width * screen.height;
-        for (uint32_t i = 0; i < total_pixels; i++) {
-            screen.framebuffer[i] = 0x1A1A1A;
-        }
+      uint32_t total_pixels = screen.width * screen.height;
+      for (uint32_t i = 0; i < total_pixels; i++) {
+        screen.framebuffer[i] = 0x1A1A1A;
+      }
     }
     init_filesystem();
-    Network::init();
     start_graphical_shell();
 
     // Fallback if shell returns
@@ -4773,7 +3649,6 @@ extern "C" void kernel_main(uint32_t magic, multiboot_info *info) {
   } else {
     draw_flower();
     init_filesystem();
-    Network::init();
     MTop();
   }
 }

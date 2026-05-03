@@ -81,7 +81,21 @@ struct Graphics {
 
 extern Graphics screen;
 
-extern uint8_t _binary_fds_raw_start[];
+int global_wallpaper = 0;
+int global_start_color_idx = 0;
+int global_menu_style = 0;
+int global_bar_position = 0; // 0=Top, 1=Bottom
+extern int global_mouse_speed;
+
+extern uint8_t _binary_wp1_raw_start[];
+extern uint8_t _binary_wp2_raw_start[];
+extern uint8_t _binary_wp3_raw_start[];
+extern uint8_t _binary_wp4_raw_start[];
+extern uint8_t _binary_wp5_raw_start[];
+extern uint8_t _binary_wp6_raw_start[];
+extern uint8_t _binary_wp7_raw_start[];
+extern uint8_t _binary_wp8_raw_start[];
+extern uint8_t _binary_wp9_raw_start[];
 extern uint8_t _binary_edit_raw_start[];
 extern uint8_t _binary_folder_raw_start[];
 extern uint8_t _binary_calc_raw_start[];
@@ -273,7 +287,26 @@ void draw_image_scaled(int x, int y, int w, int h, uint8_t *data, int src_w,
 }
 
 void draw_wallpaper() {
-  uint32_t *wallpaper = (uint32_t *)_binary_fds_raw_start;
+  uint32_t *wallpaper;
+  if (global_wallpaper == 0)
+    wallpaper = (uint32_t *)_binary_wp1_raw_start;
+  else if (global_wallpaper == 1)
+    wallpaper = (uint32_t *)_binary_wp2_raw_start;
+  else if (global_wallpaper == 2)
+    wallpaper = (uint32_t *)_binary_wp3_raw_start;
+  else if (global_wallpaper == 3)
+    wallpaper = (uint32_t *)_binary_wp4_raw_start;
+  else if (global_wallpaper == 4)
+    wallpaper = (uint32_t *)_binary_wp5_raw_start;
+  else if (global_wallpaper == 5)
+    wallpaper = (uint32_t *)_binary_wp6_raw_start;
+  else if (global_wallpaper == 6)
+    wallpaper = (uint32_t *)_binary_wp7_raw_start;
+  else if (global_wallpaper == 7)
+    wallpaper = (uint32_t *)_binary_wp8_raw_start;
+  else
+    wallpaper = (uint32_t *)_binary_wp9_raw_start;
+
   for (uint32_t y = 0; y < screen.height; y++) {
     for (uint32_t x = 0; x < screen.width; x++) {
       // Tile 800x600 wallpaper safely
@@ -309,12 +342,18 @@ void uint_to_string(uint32_t value, char *str) {
 }
 
 void draw_top_bar() {
-  draw_rect_alpha(0, 0, screen.width, 25, 0x000000, 160);
+  int bar_y = 0;
+  if (global_bar_position == 1)
+    bar_y = screen.height - 25;
+
+  draw_rect_alpha(0, bar_y, screen.width, 25, 0x000000, 160);
 
   // Red menu button - top right
   int btn_x = screen.width - 70;
-  draw_rect_alpha(btn_x, 2, 60, 21, 0xCC2222, 230);
-  draw_string(btn_x + 10, 8, "Menu", 0xFFFFFF);
+  uint32_t start_colors[] = {0xCC2222, 0x005A9E, 0x22CC22, 0x333333};
+  uint32_t btn_color = start_colors[global_start_color_idx];
+  draw_rect_alpha(btn_x, bar_y + 2, 60, 21, btn_color, 230);
+  draw_string(btn_x + 10, bar_y + 8, "Menu", 0xFFFFFF);
 
   uint32_t ram = get_total_ram_mb();
   Time t = get_time();
@@ -338,7 +377,7 @@ void draw_top_bar() {
   bar_text[len++] = '0' + (t.second % 10);
   bar_text[len] = '\0';
 
-  draw_string(10, 8, bar_text, 0xDDDDDD);
+  draw_string(10, bar_y + 8, bar_text, 0xDDDDDD);
 }
 
 void draw_window(int x, int y, int w, int h, const char *title, bool active) {
@@ -604,28 +643,141 @@ void handle_calculator_click(CalcState &cs, int x, int y, int w, int h) {
 // ============================================================================
 
 struct SettingsState {
-  int language; // 0=EN, 1=DE, 2=FR
+  int language;    // 0=EN, 1=DE, 2=FR
+  int current_tab; // 0=Keyboard, 1=Customizing
 };
 
 void draw_settings_content(int x, int y, int w, int h, SettingsState &ss) {
   int cy = y + 28;
-  draw_string(x + 10, cy + 10, "Language Settings", 0x333333);
 
-  // Buttons for language
-  draw_rect_alpha(x + 10, cy + 30, 80, 25,
-                  ss.language == 0 ? 0x005A9E : 0xCCCCCC, 255);
-  draw_string(x + 25, cy + 38, "English",
-              ss.language == 0 ? 0xFFFFFF : 0x000000);
+  // Tabs
+  draw_rect_alpha(x + 10, cy + 10, 120, 25,
+                  ss.current_tab == 0 ? 0x005A9E : 0xCCCCCC, 255);
+  draw_string(x + 30, cy + 18, "Keyboard",
+              ss.current_tab == 0 ? 0xFFFFFF : 0x000000);
+  draw_rect_alpha(x + 140, cy + 10, 120, 25,
+                  ss.current_tab == 1 ? 0x005A9E : 0xCCCCCC, 255);
+  draw_string(x + 150, cy + 18, "Customizing",
+              ss.current_tab == 1 ? 0xFFFFFF : 0x000000);
 
-  draw_rect_alpha(x + 100, cy + 30, 80, 25,
-                  ss.language == 1 ? 0x005A9E : 0xCCCCCC, 255);
-  draw_string(x + 115, cy + 38, "German",
-              ss.language == 1 ? 0xFFFFFF : 0x000000);
+  if (ss.current_tab == 0) {
+    draw_string(x + 10, cy + 50, "Language Settings", 0x333333);
 
-  draw_rect_alpha(x + 190, cy + 30, 80, 25,
-                  ss.language == 2 ? 0x005A9E : 0xCCCCCC, 255);
-  draw_string(x + 205, cy + 38, "French",
-              ss.language == 2 ? 0xFFFFFF : 0x000000);
+    // Buttons for language
+    draw_rect_alpha(x + 10, cy + 70, 80, 25,
+                    ss.language == 0 ? 0x005A9E : 0xCCCCCC, 255);
+    draw_string(x + 25, cy + 78, "English",
+                ss.language == 0 ? 0xFFFFFF : 0x000000);
+
+    draw_rect_alpha(x + 100, cy + 70, 80, 25,
+                    ss.language == 1 ? 0x005A9E : 0xCCCCCC, 255);
+    draw_string(x + 115, cy + 78, "German",
+                ss.language == 1 ? 0xFFFFFF : 0x000000);
+
+    draw_rect_alpha(x + 190, cy + 70, 80, 25,
+                    ss.language == 2 ? 0x005A9E : 0xCCCCCC, 255);
+    draw_string(x + 205, cy + 78, "French",
+                ss.language == 2 ? 0xFFFFFF : 0x000000);
+
+    draw_string(x + 10, cy + 110, "Cursor Speed", 0x333333);
+    draw_rect_alpha(x + 10, cy + 130, 60, 25,
+                    global_mouse_speed == 0 ? 0x005A9E : 0xCCCCCC, 255);
+    draw_string(x + 20, cy + 138, "Slow",
+                global_mouse_speed == 0 ? 0xFFFFFF : 0x000000);
+
+    draw_rect_alpha(x + 80, cy + 130, 60, 25,
+                    global_mouse_speed == 1 ? 0x005A9E : 0xCCCCCC, 255);
+    draw_string(x + 95, cy + 138, "Mid",
+                global_mouse_speed == 1 ? 0xFFFFFF : 0x000000);
+
+    draw_rect_alpha(x + 150, cy + 130, 60, 25,
+                    global_mouse_speed == 2 ? 0x005A9E : 0xCCCCCC, 255);
+    draw_string(x + 160, cy + 138, "Norm",
+                global_mouse_speed == 2 ? 0xFFFFFF : 0x000000);
+
+    draw_rect_alpha(x + 220, cy + 130, 60, 25,
+                    global_mouse_speed == 3 ? 0x005A9E : 0xCCCCCC, 255);
+    draw_string(x + 230, cy + 138, "Fast",
+                global_mouse_speed == 3 ? 0xFFFFFF : 0x000000);
+  } else {
+    draw_string(x + 10, cy + 50, "Wallpaper", 0x333333);
+    draw_rect_alpha(x + 10, cy + 70, 80, 25,
+                    global_wallpaper == 0 ? 0x005A9E : 0xCCCCCC, 255);
+    draw_string(x + 25, cy + 78, "Simple",
+                global_wallpaper == 0 ? 0xFFFFFF : 0x000000);
+    draw_rect_alpha(x + 100, cy + 70, 80, 25,
+                    global_wallpaper == 1 ? 0x005A9E : 0xCCCCCC, 255);
+    draw_string(x + 120, cy + 78, "Field",
+                global_wallpaper == 1 ? 0xFFFFFF : 0x000000);
+    draw_rect_alpha(x + 190, cy + 70, 80, 25,
+                    global_wallpaper == 2 ? 0x005A9E : 0xCCCCCC, 255);
+    draw_string(x + 215, cy + 78, "Devs",
+                global_wallpaper == 2 ? 0xFFFFFF : 0x000000);
+
+    draw_rect_alpha(x + 10, cy + 100, 80, 25,
+                    global_wallpaper == 3 ? 0x005A9E : 0xCCCCCC, 255);
+    draw_string(x + 30, cy + 108, "Way",
+                global_wallpaper == 3 ? 0xFFFFFF : 0x000000);
+    draw_rect_alpha(x + 100, cy + 100, 80, 25,
+                    global_wallpaper == 4 ? 0x005A9E : 0xCCCCCC, 255);
+    draw_string(x + 115, cy + 108, "Wonne",
+                global_wallpaper == 4 ? 0xFFFFFF : 0x000000);
+    draw_rect_alpha(x + 190, cy + 100, 80, 25,
+                    global_wallpaper == 5 ? 0x005A9E : 0xCCCCCC, 255);
+    draw_string(x + 205, cy + 108, "Forest",
+                global_wallpaper == 5 ? 0xFFFFFF : 0x000000);
+
+    draw_rect_alpha(x + 10, cy + 130, 80, 25,
+                    global_wallpaper == 6 ? 0x005A9E : 0xCCCCCC, 255);
+    draw_string(x + 25, cy + 138, "Sea 1",
+                global_wallpaper == 6 ? 0xFFFFFF : 0x000000);
+    draw_rect_alpha(x + 100, cy + 130, 80, 25,
+                    global_wallpaper == 7 ? 0x005A9E : 0xCCCCCC, 255);
+    draw_string(x + 115, cy + 138, "Sea 2",
+                global_wallpaper == 7 ? 0xFFFFFF : 0x000000);
+    draw_rect_alpha(x + 190, cy + 130, 80, 25,
+                    global_wallpaper == 8 ? 0x005A9E : 0xCCCCCC, 255);
+    draw_string(x + 205, cy + 138, "Sunset",
+                global_wallpaper == 8 ? 0xFFFFFF : 0x000000);
+
+    draw_string(x + 10, cy + 165, "Start Color", 0x333333);
+    draw_rect_alpha(x + 10, cy + 185, 60, 25,
+                    global_start_color_idx == 0 ? 0x005A9E : 0xCCCCCC, 255);
+    draw_string(x + 25, cy + 193, "Red",
+                global_start_color_idx == 0 ? 0xFFFFFF : 0x000000);
+    draw_rect_alpha(x + 80, cy + 185, 60, 25,
+                    global_start_color_idx == 1 ? 0x005A9E : 0xCCCCCC, 255);
+    draw_string(x + 90, cy + 193, "Blue",
+                global_start_color_idx == 1 ? 0xFFFFFF : 0x000000);
+    draw_rect_alpha(x + 150, cy + 185, 60, 25,
+                    global_start_color_idx == 2 ? 0x005A9E : 0xCCCCCC, 255);
+    draw_string(x + 155, cy + 193, "Green",
+                global_start_color_idx == 2 ? 0xFFFFFF : 0x000000);
+    draw_rect_alpha(x + 220, cy + 185, 60, 25,
+                    global_start_color_idx == 3 ? 0x005A9E : 0xCCCCCC, 255);
+    draw_string(x + 230, cy + 193, "Dark",
+                global_start_color_idx == 3 ? 0xFFFFFF : 0x000000);
+
+    draw_string(x + 10, cy + 225, "Menu Style", 0x333333);
+    draw_rect_alpha(x + 10, cy + 245, 80, 25,
+                    global_menu_style == 0 ? 0x005A9E : 0xCCCCCC, 255);
+    draw_string(x + 15, cy + 253, "Centered",
+                global_menu_style == 0 ? 0xFFFFFF : 0x000000);
+    draw_rect_alpha(x + 100, cy + 245, 80, 25,
+                    global_menu_style == 1 ? 0x005A9E : 0xCCCCCC, 255);
+    draw_string(x + 105, cy + 253, "Right Edge",
+                global_menu_style == 1 ? 0xFFFFFF : 0x000000);
+
+    draw_string(x + 10, cy + 275, "Bar Position", 0x333333);
+    draw_rect_alpha(x + 10, cy + 295, 80, 25,
+                    global_bar_position == 0 ? 0x005A9E : 0xCCCCCC, 255);
+    draw_string(x + 30, cy + 303, "Top",
+                global_bar_position == 0 ? 0xFFFFFF : 0x000000);
+    draw_rect_alpha(x + 100, cy + 295, 80, 25,
+                    global_bar_position == 1 ? 0x005A9E : 0xCCCCCC, 255);
+    draw_string(x + 115, cy + 303, "Bottom",
+                global_bar_position == 1 ? 0xFFFFFF : 0x000000);
+  }
 }
 
 // ============================================================================
@@ -720,15 +872,88 @@ bool handle_disk_manager_click(int x, int y, int w) {
 
 void handle_settings_click(SettingsState &ss, int x, int y) {
   int cy = y + 28;
-  // Language clicks
-  if (mouse_y >= cy + 30 && mouse_y <= cy + 55) {
-    if (mouse_x >= x + 10 && mouse_x <= x + 90)
-      ss.language = 0;
-    else if (mouse_x >= x + 100 && mouse_x <= x + 180)
-      ss.language = 1;
-    else if (mouse_x >= x + 190 && mouse_x <= x + 270)
-      ss.language = 2;
-    shell_set_language(ss.language);
+
+  // Tab clicks
+  if (mouse_y >= cy + 10 && mouse_y <= cy + 35) {
+    if (mouse_x >= x + 10 && mouse_x <= x + 130)
+      ss.current_tab = 0;
+    else if (mouse_x >= x + 140 && mouse_x <= x + 260)
+      ss.current_tab = 1;
+  }
+
+  if (ss.current_tab == 0) {
+    // Language clicks
+    if (mouse_y >= cy + 70 && mouse_y <= cy + 95) {
+      if (mouse_x >= x + 10 && mouse_x <= x + 90)
+        ss.language = 0;
+      else if (mouse_x >= x + 100 && mouse_x <= x + 180)
+        ss.language = 1;
+      else if (mouse_x >= x + 190 && mouse_x <= x + 270)
+        ss.language = 2;
+      shell_set_language(ss.language);
+    }
+    // Mouse speed clicks
+    if (mouse_y >= cy + 130 && mouse_y <= cy + 155) {
+      if (mouse_x >= x + 10 && mouse_x <= x + 70)
+        global_mouse_speed = 0;
+      else if (mouse_x >= x + 80 && mouse_x <= x + 140)
+        global_mouse_speed = 1;
+      else if (mouse_x >= x + 150 && mouse_x <= x + 210)
+        global_mouse_speed = 2;
+      else if (mouse_x >= x + 220 && mouse_x <= x + 280)
+        global_mouse_speed = 3;
+    }
+  } else {
+    // Wallpaper clicks
+    if (mouse_y >= cy + 70 && mouse_y <= cy + 95) {
+      if (mouse_x >= x + 10 && mouse_x <= x + 90)
+        global_wallpaper = 0;
+      else if (mouse_x >= x + 100 && mouse_x <= x + 180)
+        global_wallpaper = 1;
+      else if (mouse_x >= x + 190 && mouse_x <= x + 270)
+        global_wallpaper = 2;
+    }
+    if (mouse_y >= cy + 100 && mouse_y <= cy + 125) {
+      if (mouse_x >= x + 10 && mouse_x <= x + 90)
+        global_wallpaper = 3;
+      else if (mouse_x >= x + 100 && mouse_x <= x + 180)
+        global_wallpaper = 4;
+      else if (mouse_x >= x + 190 && mouse_x <= x + 270)
+        global_wallpaper = 5;
+    }
+    if (mouse_y >= cy + 130 && mouse_y <= cy + 155) {
+      if (mouse_x >= x + 10 && mouse_x <= x + 90)
+        global_wallpaper = 6;
+      else if (mouse_x >= x + 100 && mouse_x <= x + 180)
+        global_wallpaper = 7;
+      else if (mouse_x >= x + 190 && mouse_x <= x + 270)
+        global_wallpaper = 8;
+    }
+    // Start color clicks
+    if (mouse_y >= cy + 185 && mouse_y <= cy + 210) {
+      if (mouse_x >= x + 10 && mouse_x <= x + 70)
+        global_start_color_idx = 0;
+      else if (mouse_x >= x + 80 && mouse_x <= x + 140)
+        global_start_color_idx = 1;
+      else if (mouse_x >= x + 150 && mouse_x <= x + 210)
+        global_start_color_idx = 2;
+      else if (mouse_x >= x + 220 && mouse_x <= x + 280)
+        global_start_color_idx = 3;
+    }
+    // Menu style clicks
+    if (mouse_y >= cy + 245 && mouse_y <= cy + 270) {
+      if (mouse_x >= x + 10 && mouse_x <= x + 90)
+        global_menu_style = 0;
+      else if (mouse_x >= x + 100 && mouse_x <= x + 180)
+        global_menu_style = 1;
+    }
+    // Bar position clicks
+    if (mouse_y >= cy + 295 && mouse_y <= cy + 320) {
+      if (mouse_x >= x + 10 && mouse_x <= x + 90)
+        global_bar_position = 0;
+      else if (mouse_x >= x + 100 && mouse_x <= x + 180)
+        global_bar_position = 1;
+    }
   }
 }
 
@@ -1279,6 +1504,12 @@ void draw_menu_dropdown() {
   int mx = (screen.width - mw) / 2;
   int my = (screen.height - mh) / 2;
 
+  if (global_menu_style == 1) {
+    mx = screen.width - mw;
+    my = (global_bar_position == 0) ? 25 : 0;
+    mh = screen.height - 25;
+  }
+
   // Drop shadow + transparent dark background (like top bar)
   draw_rect_alpha(mx + 4, my + 4, mw, mh, 0x000000, 80);
   draw_rect_alpha(mx, my, mw, mh, 0x000000, 180);
@@ -1343,7 +1574,7 @@ extern "C" void start_graphical_shell() {
   static WinState calc = {200, 100, 200, 280, false, false, false, 0, 0};
   static WinState word = {50, 50, 500, 400, false, false, false, 0, 0};
   static WinState tabels = {100, 100, 500, 300, false, false, false, 0, 0};
-  static WinState settings = {300, 100, 300, 100, false, false, false, 0, 0};
+  static WinState settings = {300, 100, 300, 370, false, false, false, 0, 0};
   static WinState disk_manager = {350,   150,   300, 250, false,
                                   false, false, 0,   0};
 
@@ -1454,9 +1685,13 @@ extern "C" void start_graphical_shell() {
 
     // --- Menu button click ---
     if (mouse_clicked) {
+      int bar_y = 0;
+      if (global_bar_position == 1)
+        bar_y = screen.height - 25;
+
       // Red menu button in top-right
-      if (mouse_y >= 2 && mouse_y <= 23 && mouse_x >= menu_btn_x &&
-          mouse_x <= menu_btn_x + 60) {
+      if (mouse_y >= bar_y + 2 && mouse_y <= bar_y + 23 &&
+          mouse_x >= menu_btn_x && mouse_x <= menu_btn_x + 60) {
         menu_open = !menu_open;
         needs_redraw = true;
       }
@@ -1468,6 +1703,12 @@ extern "C" void start_graphical_shell() {
         int mh = item_count * item_h + 10;
         int mx_menu = (screen.width - mw) / 2;
         int my_menu = (screen.height - mh) / 2;
+
+        if (global_menu_style == 1) {
+          mx_menu = screen.width - mw;
+          my_menu = (global_bar_position == 0) ? 25 : 0;
+          mh = screen.height - 25;
+        }
 
         if (mouse_x >= mx_menu && mouse_x <= mx_menu + mw &&
             mouse_y >= my_menu + 5 &&
