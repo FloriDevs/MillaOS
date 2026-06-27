@@ -32,6 +32,16 @@ bool shell_mount_disk(int disk_id);
 void shell_unmount_disk();
 int shell_get_active_disk();
 bool shell_is_hdd_present();
+// MPra Interpreter API
+bool mpra_is_running();
+const char* mpra_get_window_title();
+int mpra_get_window_w();
+int mpra_get_window_h();
+void mpra_run_file(const char *filename);
+void mpra_draw_content(int x, int y, int w, int h);
+void mpra_handle_click(int x, int y);
+void mpra_handle_key(uint8_t scancode);
+void mpra_close();
 }
 
 bool string_starts_with(const char *str, const char *prefix) {
@@ -1399,6 +1409,25 @@ struct WinState {
   int drag_ox, drag_oy;
 };
 
+static WinState welcome = {80, 60, 640, 340, true, false, false, 0, 0};
+static WinState fm = {120, 80, 500, 380, false, false, false, 0, 0};
+static WinState calc = {200, 100, 200, 280, false, false, false, 0, 0};
+static WinState word = {50, 50, 500, 400, false, false, false, 0, 0};
+static WinState tabels = {100, 100, 500, 300, false, false, false, 0, 0};
+static WinState settings = {300, 100, 300, 370, false, false, false, 0, 0};
+static WinState disk_manager = {350, 150, 300, 250, false, false, false, 0, 0};
+static WinState mpra_win = {150, 80, 400, 400, false, false, false, 0, 0};
+
+static CalcState cs;
+static WordState ws;
+static SheetState sss;
+static SettingsState ss = {0}; // 0 = EN
+
+static int fm_selected = 0;
+static int fm_scroll = 0;
+static bool fm_files_loaded = false;
+static bool menu_open = false;
+
 void draw_all_ui(WinState &welcome, WinState &fm, WinState &calc,
                  WinState &word, WinState &tabels, WinState &settings,
                  WinState &disk_manager, CalcState &cs, WordState &ws,
@@ -1493,6 +1522,16 @@ void draw_all_ui(WinState &welcome, WinState &fm, WinState &calc,
     }
   }
 
+  // Draw MPra window
+  if (mpra_win.open) {
+    if (!mpra_win.minimized) {
+      draw_window(mpra_win.x, mpra_win.y, mpra_win.w, mpra_win.h, mpra_get_window_title(), true);
+      mpra_draw_content(mpra_win.x, mpra_win.y, mpra_win.w, mpra_win.h);
+    } else {
+      draw_window(mpra_win.x, mpra_win.y, mpra_win.w, 28, mpra_get_window_title(), true);
+    }
+  }
+
   draw_top_bar();
 }
 
@@ -1552,6 +1591,41 @@ bool handle_window_titlebar(WinState &win, int mx, int my, bool clicked) {
   return false;
 }
 
+extern "C" void mpra_trigger_redraw() {
+  draw_all_ui(welcome, fm, calc, word, tabels, settings, disk_manager, cs, ws, sss, ss, fm_selected, fm_scroll);
+  if (menu_open)
+    draw_menu_dropdown();
+
+  // Draw the mouse cursor and swap buffers
+  for (int y = 0; y < (int)screen.height; y++) {
+    for (int x = 0; x < (int)screen.width; x++) {
+      uint32_t pixel = ui_buffer[y * screen.width + x];
+      if (x == mouse_x && y >= mouse_y - 5 && y <= mouse_y + 5) pixel = 0xFFFFFF;
+      if (y == mouse_y && x >= mouse_x - 5 && x <= mouse_x + 5) pixel = 0xFFFFFF;
+      if (frontbuffer[y * screen.width + x] != pixel) {
+        frontbuffer[y * screen.width + x] = pixel;
+        put_pixel(x, y, pixel);
+      }
+    }
+  }
+}
+
+extern "C" void mpra_delay(int seconds) {
+  Time start = get_time();
+  int start_sec = start.hour * 3600 + start.minute * 60 + start.second;
+  while (1) {
+    Time now = get_time();
+    int now_sec = now.hour * 3600 + now.minute * 60 + now.second;
+    int diff = now_sec - start_sec;
+    if (diff < 0) diff += 24 * 3600;
+    if (diff >= seconds) break;
+
+    mpra_trigger_redraw();
+
+    for (int k = 0; k < 10000; k++) asm volatile("nop");
+  }
+}
+
 extern "C" void start_graphical_shell() {
   ui_buffer = (uint32_t *)malloc(screen.width * screen.height * 4);
   frontbuffer = (uint32_t *)malloc(screen.width * screen.height * 4);
@@ -1569,22 +1643,12 @@ extern "C" void start_graphical_shell() {
 
   init_minimal_font();
 
-  static WinState welcome = {80, 60, 640, 340, true, false, false, 0, 0};
-  static WinState fm = {120, 80, 500, 380, false, false, false, 0, 0};
-  static WinState calc = {200, 100, 200, 280, false, false, false, 0, 0};
-  static WinState word = {50, 50, 500, 400, false, false, false, 0, 0};
-  static WinState tabels = {100, 100, 500, 300, false, false, false, 0, 0};
-  static WinState settings = {300, 100, 300, 370, false, false, false, 0, 0};
-  static WinState disk_manager = {350,   150,   300, 250, false,
-                                  false, false, 0,   0};
-
-  static CalcState cs;
+  // Initialize states
   string_copy(cs.display, "0");
   cs.first_val = 0;
   cs.last_op = 0;
   cs.next_clears = true;
 
-  static WordState ws;
   string_copy(ws.filename, "DOC.TXT");
   ws.filename_len = 7;
   ws.buffer[0] = '\0';
@@ -1593,7 +1657,6 @@ extern "C" void start_graphical_shell() {
   ws.editing_filename = false;
   ws.show_open_dialog = false;
 
-  static SheetState sss;
   static bool sss_init = false;
   if (!sss_init) {
     for (int r = 0; r < 10; r++) {
@@ -1610,12 +1673,13 @@ extern "C" void start_graphical_shell() {
     sss_init = true;
   }
 
-  static SettingsState ss = {0}; // 0 = EN
+  ss.language = 0;
+  ss.current_tab = 0;
 
-  int fm_selected = 0;
-  int fm_scroll = 0;
-  bool fm_files_loaded = false;
-  bool menu_open = false;
+  fm_selected = 0;
+  fm_scroll = 0;
+  fm_files_loaded = false;
+  menu_open = false;
 
   bool last_mouse_left_state = false;
 
@@ -1636,6 +1700,11 @@ extern "C" void start_graphical_shell() {
 
     if (scancode != 0 && word.open && !word.minimized) {
       handle_word_key(ws, scancode);
+      needs_redraw = true;
+    }
+
+    if (scancode != 0 && mpra_win.open && !mpra_win.minimized && !mpra_win.dragging) {
+      mpra_handle_key(scancode);
       needs_redraw = true;
     }
 
@@ -1781,6 +1850,16 @@ extern "C" void start_graphical_shell() {
       needs_redraw = true;
     }
 
+    // --- MPra content clicks ---
+    if (mouse_clicked && mpra_win.open && !mpra_win.minimized) {
+      int content_y = mpra_win.y + 28;
+      if (mouse_x >= mpra_win.x && mouse_x < mpra_win.x + mpra_win.w &&
+          mouse_y >= content_y && mouse_y < content_y + mpra_win.h - 28) {
+        mpra_handle_click(mouse_x - mpra_win.x, mouse_y - content_y);
+        needs_redraw = true;
+      }
+    }
+
     // --- File Manager content clicks ---
     if (mouse_clicked && fm.open && !fm.minimized) {
       int content_y = fm.y + 28 + 22;
@@ -1792,21 +1871,44 @@ extern "C" void start_graphical_shell() {
         int new_sel = clicked_row + fm_scroll;
         if (new_sel >= 0 && new_sel < get_shell_file_count()) {
           if (fm_selected == new_sel && !get_shell_file_is_dir(new_sel)) {
-            // Double clicked: Open in Documents
             char name[16];
             get_shell_file_name(new_sel, name);
-            string_copy(ws.filename, name);
-            ws.filename_len = string_length(name);
-            if (shell_read_file(ws.filename, ws.buffer, 4096)) {
-              ws.cursor_pos = 0;
-              while (ws.buffer[ws.cursor_pos] != '\0' && ws.cursor_pos < 4096)
-                ws.cursor_pos++;
-            } else {
-              ws.buffer[0] = '\0';
-              ws.cursor_pos = 0;
+
+            // Check if name ends with .mru or .MRU
+            int name_len = string_length(name);
+            bool is_mpra = false;
+            if (name_len > 4) {
+              if (name[name_len-4] == '.' &&
+                  (name[name_len-3] == 'm' || name[name_len-3] == 'M') &&
+                  (name[name_len-2] == 'r' || name[name_len-2] == 'R') &&
+                  (name[name_len-1] == 'u' || name[name_len-1] == 'U')) {
+                is_mpra = true;
+              }
             }
-            word.open = true;
-            word.minimized = false;
+
+            if (is_mpra) {
+              mpra_run_file(name);
+              if (mpra_is_running()) {
+                mpra_win.w = mpra_get_window_w();
+                mpra_win.h = mpra_get_window_h();
+                mpra_win.open = true;
+                mpra_win.minimized = false;
+              }
+            } else {
+              // Double clicked: Open in Documents
+              string_copy(ws.filename, name);
+              ws.filename_len = string_length(name);
+              if (shell_read_file(ws.filename, ws.buffer, 4096)) {
+                ws.cursor_pos = 0;
+                while (ws.buffer[ws.cursor_pos] != '\0' && ws.cursor_pos < 4096)
+                  ws.cursor_pos++;
+              } else {
+                ws.buffer[0] = '\0';
+                ws.cursor_pos = 0;
+              }
+              word.open = true;
+              word.minimized = false;
+            }
           }
           fm_selected = new_sel;
           needs_redraw = true;
@@ -1816,7 +1918,7 @@ extern "C" void start_graphical_shell() {
 
     // --- Title bar interactions ---
     if (mouse_clicked) {
-      // Priority: Disk Manager > Settings > tabels > Word > Calculator > FM >
+      // Priority: Disk Manager > Settings > tabels > Word > Calculator > FM > MPra >
       // Welcome
       if (!handle_window_titlebar(disk_manager, mouse_x, mouse_y, true)) {
         if (!handle_window_titlebar(settings, mouse_x, mouse_y, true)) {
@@ -1824,12 +1926,17 @@ extern "C" void start_graphical_shell() {
             if (!handle_window_titlebar(word, mouse_x, mouse_y, true)) {
               if (!handle_window_titlebar(calc, mouse_x, mouse_y, true)) {
                 if (!handle_window_titlebar(fm, mouse_x, mouse_y, true)) {
-                  handle_window_titlebar(welcome, mouse_x, mouse_y, true);
+                  if (!handle_window_titlebar(mpra_win, mouse_x, mouse_y, true)) {
+                    handle_window_titlebar(welcome, mouse_x, mouse_y, true);
+                  }
                 }
               }
             }
           }
         }
+      }
+      if (!mpra_win.open && mpra_is_running()) {
+        mpra_close();
       }
       needs_redraw = true;
     }
@@ -1837,7 +1944,7 @@ extern "C" void start_graphical_shell() {
     // --- Release drag ---
     if (mouse_released) {
       if (welcome.dragging || fm.dragging || calc.dragging || word.dragging ||
-          settings.dragging || disk_manager.dragging) {
+          settings.dragging || disk_manager.dragging || mpra_win.dragging) {
         if (welcome.dragging)
           welcome.minimized = false;
         if (fm.dragging)
@@ -1852,6 +1959,8 @@ extern "C" void start_graphical_shell() {
           settings.minimized = false;
         if (disk_manager.dragging)
           disk_manager.minimized = false;
+        if (mpra_win.dragging)
+          mpra_win.minimized = false;
         needs_redraw = true;
       }
       welcome.dragging = false;
@@ -1861,6 +1970,7 @@ extern "C" void start_graphical_shell() {
       tabels.dragging = false;
       settings.dragging = false;
       disk_manager.dragging = false;
+      mpra_win.dragging = false;
     }
 
     // --- Dragging ---
@@ -1898,6 +2008,11 @@ extern "C" void start_graphical_shell() {
       if (disk_manager.dragging) {
         disk_manager.x = mouse_x - disk_manager.drag_ox;
         disk_manager.y = mouse_y - disk_manager.drag_oy;
+        needs_redraw = true;
+      }
+      if (mpra_win.dragging) {
+        mpra_win.x = mouse_x - mpra_win.drag_ox;
+        mpra_win.y = mouse_y - mpra_win.drag_oy;
         needs_redraw = true;
       }
     }
