@@ -1,54 +1,26 @@
-# Milla OS (Micro Integrated Low-Level Application OS) 💻✨
+# Milla OS 💻✨
 
 ## Introduction
+What's Milla OS ? - Milla OS is a Foss Operating System written by FloriDevs.
 
-**Milla OS** stands for **Micro Integrated Low-Level Application OS**. It is a minimal, educational, and low-level operating system designed from the ground up to understand core operating system principles, hardware interaction, and kernel development.
+## Features:
+Milla OS has a desktop with folowing bundeled with it:
+- a Texteditor
+- a spreadsheet app
+- a calculator
+- a file manager
+- settings for HIDs and Apperance
+- The MPra run time environment (An own programming language for GUI Apps)
 
-Milla OS aims for **simplicity and clarity**, focusing on essential OS components. It provides a platform for learning about boot processes, memory management, interrupt handling, and basic device drivers, all while featuring a user-friendly **Graphical User Interface (GUI)**.
+## How to build:
+You can build the OS on Linux (I use Debian) by running build.sh 
 
----
+## Technical:
+- Written in C++
+- uses Grub as bootloader
+- Kernel Typ: Monolithic
 
-## ✨ Features
-
-* **Graphical User Interface (GUI):** Provides a visual environment for user interaction.
-* **GRUB Bootloader:** Utilizes the popular GNU GRUB bootloader for system startup.
-* **Kernel Entry & Core:** Developed primarily in **C++** for better object-oriented design and modularity in the kernel.
-* **Interrupt Handling:** Basic setup for handling keyboard, mouse, and timer interrupts.
-* **Minimal Memory Management:** Initial setup for basic memory addressing and virtual memory concepts.
-
----
-
-## 🛠️ Technology Stack
-
-| Component | Technology/Language | Purpose |
-| :--- | :--- | :--- |
-| **Bootloader** | **GRUB** (GNU GRand Unified Bootloader) | Handling the boot process and loading the kernel. |
-| **Kernel Core** | **C++** (with C dependencies) | Main OS logic, GUI implementation, and low-level functions. |
-
-
----
-
-## 🚀 Getting Started
-
-### Pre-built Version
-
-You can test the latest stable version of Milla OS right now!
-
-➡️ **Visit the official pre-built release page:**
-**`millaos.github.io`**
-
-### Building the OS from Source
-
-#### Prerequisites
-
-To build Milla OS, you will need the following tools installed:
-
-
-
-
-#### Running the OS
-
-Use QEMU to boot the generated ISO image:
-
-```bash
-qemu-system-i386 -cdrom [filename].iso
+## minimum system specs:
+- 32 mb RAM
+- Pentium 1
+that's it greatings to you, Windows 11 ;-)
