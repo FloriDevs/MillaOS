@@ -24,3 +24,6 @@ You can build the OS on Linux (I use Debian) by running build.sh
 - 32 mb RAM
 - Pentium 1
 that's it greatings to you, Windows 11 ;-)
+
+## If you have questions:
+you can send me an Email to ich@floridevs.dedyn.io
