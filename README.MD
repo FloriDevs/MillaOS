@@ -1,19 +1,21 @@
 # Milla OS 💻✨
 
 ## Introduction
-What's Milla OS ? - Milla OS is a Foss Operating System written by FloriDevs.
+What's Milla OS? - Milla OS is a Foss Operating System written by FloriDevs.
 
 ## Features:
-Milla OS has a desktop with folowing bundeled with it:
+Milla OS has a desktop with following bundled with it:
 - a Texteditor
 - a spreadsheet app
 - a calculator
 - a file manager
-- settings for HIDs and Apperance
+- settings for HIDs and Appearance
 - The MPra run time environment (An own programming language for GUI Apps)
 
 ## How to build:
 You can build the OS on Linux (I use Debian) by running build.sh 
+```bash
+./build.sh
 
 ## Technical:
 - Written in C++
