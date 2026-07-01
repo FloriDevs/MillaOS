@@ -29,6 +29,7 @@ echo "1. Kompiliere den C++-Kernel (kernel.cpp)..."
 nasm -f elf32 boot.s -o boot.o
 g++ -m32 -ffreestanding -fno-pie -c kernel.cpp -o kernel.o
 g++ -m32 -ffreestanding -fno-pie -c shell.cpp -o shell.o
+g++ -m32 -ffreestanding -fno-pie -c mpra.cpp -o mpra.o
 g++ -m32 -ffreestanding -fno-pie -c mos-classic.cpp -o kernel-classic.o
 
 # Wallpaper und Icons vorbereiten
@@ -71,7 +72,7 @@ fi
 
 # 2. Kernel verknüpfen
 echo "2. Verknüpfe den Kernel mit linker.ld..."
-ld -m elf_i386 -T linker.ld -o kernel.bin boot.o kernel.o shell.o wp1.o wp2.o wp3.o wp4.o wp5.o wp6.o wp7.o wp8.o wp9.o logo1.o logo2.o
+ld -m elf_i386 -T linker.ld -o kernel.bin boot.o kernel.o shell.o mpra.o wp1.o wp2.o wp3.o wp4.o wp5.o wp6.o wp7.o wp8.o wp9.o logo1.o logo2.o
 if [ $? -ne 0 ]; then
     echo "Fehler beim Verknüpfen des Kernels."
     exit 1
@@ -107,7 +108,7 @@ fi
 
 # 7. Aufräumen der temporären Dateien
 echo "7. Lösche temporäre Dateien..."
-rm -r isodir kernel.o kernel.bin kernel-classic.o kernel-classic.bin
+rm -r isodir kernel.o shell.o mpra.o kernel.bin kernel-classic.o kernel-classic.bin
 
 echo "--- Build-Prozess abgeschlossen! ---"
 echo "Die bootfähige Datei 'myos.iso' wurde erfolgreich erstellt."
