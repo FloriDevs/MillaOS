@@ -16,15 +16,15 @@ Milla OS has a desktop with following bundled with it:
 You can build the OS on Linux (I use Debian) by running build.sh 
 ```bash
 ./build.sh
-
+```
 ## Technical:
 - Written in C++
 - uses Grub as bootloader
 - Kernel Typ: Monolithic
 
 ## minimum system specs:
-- 32 mb RAM
-- Pentium 1
+- 45 mb RAM
+- i386
 that's it greatings to you, Windows 11 ;-)
 
 ## If you have questions:
