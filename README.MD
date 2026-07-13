@@ -25,7 +25,7 @@ You can build the OS on Linux (I use Debian) by running build.sh
 ## minimum system specs:
 - 45 mb RAM
 - i386
-that's it greatings to you, Windows 11 ;-)
+that's it greetings to you, Windows 11 ;-)
 
 ## If you have questions:
 you can send me an Email to ich@floridevs.dedyn.io
