@@ -332,7 +332,8 @@ void handle_mouse_byte(uint8_t b) {
     int dx = (int8_t)mouse_byte[1];
     int dy = (int8_t)mouse_byte[2];
     int divisor = 4 - global_mouse_speed;
-    if (divisor < 1) divisor = 1;
+    if (divisor < 1)
+      divisor = 1;
     mouse_x += dx / divisor;
     mouse_y -= dy / divisor;
 
@@ -987,6 +988,24 @@ int find_file(const char *name) {
   return -1;
 }
 
+bool file_exists(const char *name) {
+  for (int i = 0; i < file_count; i++) {
+    if (string_compare(file_cache[i].name, name)) return true;
+    bool match = true;
+    int j = 0;
+    while (file_cache[i].name[j] != '\0' && name[j] != '\0') {
+      char c1 = file_cache[i].name[j];
+      char c2 = name[j];
+      if (c1 >= 'a' && c1 <= 'z') c1 -= 32;
+      if (c2 >= 'a' && c2 <= 'z') c2 -= 32;
+      if (c1 != c2) { match = false; break; }
+      j++;
+    }
+    if (match && file_cache[i].name[j] == '\0' && name[j] == '\0') return true;
+  }
+  return false;
+}
+
 bool read_file(ATADevice *dev, uint32_t cluster, char *buffer,
                uint32_t max_size) {
   uint32_t pos = 0;
@@ -1132,6 +1151,21 @@ bool write_file(ATADevice *dev, const char *filename, const char *data,
 // Initialisierung
 ATADevice hdd_device;
 
+extern "C" bool create_mou_file_if_needed(ATADevice *dev) {
+  if (!dev || dev == &ramdisk_device || !fs_mounted) {
+    return false;
+  }
+  read_directory(dev, root_dir_first_cluster);
+  if (file_exists(".mou")) {
+    return true;
+  }
+  bool created = write_file(dev, ".mou", "1", 1);
+  if (created) {
+    read_directory(dev, root_dir_first_cluster);
+  }
+  return created;
+}
+
 void init_filesystem() {
 
   // +++ ERSTELLE RAM-DISK +++
@@ -1191,26 +1225,46 @@ void init_filesystem() {
     }
   }
 
-  // AUTO-MOUNT HDD if FAT exists
+  // AUTO-MOUNT HDD on boot ONLY IF .mou EXISTS ON THE VOLUME
   if (hdd_device.present) {
+    bool hdd_mounted_on_boot = false;
     if (ata_read_sector(&hdd_device, 0, sector_buffer)) {
       if (sector_buffer[510] == 0x55 && sector_buffer[511] == 0xAA) {
         MBR *mbr = (MBR *)sector_buffer;
         for (int i = 0; i < 4; i++) {
           if (mbr->partitions[i].total_sectors > 0) {
             if (mount_fat16(&hdd_device, mbr->partitions[i].start_lba)) {
-              active_disk = &hdd_device; // Prefer HDD if FAT exists
-              print_string(23, 45, "HDD Partition Mounted    ", 0x0A);
-              break;
+              read_directory(&hdd_device, root_dir_first_cluster);
+              if (file_exists(".mou")) {
+                active_disk = &hdd_device;
+                hdd_mounted_on_boot = true;
+                print_string(23, 45, "HDD Mounted (.mou present)", 0x0A);
+                break;
+              }
             }
           }
         }
-        // Also check LBA 0 for superfloppy
-        if (!fs_mounted && mount_fat16(&hdd_device, 0)) {
-          active_disk = &hdd_device;
-          print_string(23, 45, "HDD Superfloppy Mounted  ", 0x0A);
+        if (!hdd_mounted_on_boot && mount_fat16(&hdd_device, 0)) {
+          read_directory(&hdd_device, root_dir_first_cluster);
+          if (file_exists(".mou")) {
+            active_disk = &hdd_device;
+            hdd_mounted_on_boot = true;
+            print_string(23, 45, "HDD Superfloppy (.mou present)", 0x0A);
+          }
         }
       }
+    }
+
+    if (hdd_mounted_on_boot) {
+      // RAM disk is unmounted; HDD is now active disk
+      read_directory(active_disk, root_dir_first_cluster);
+      create_mou_file_if_needed(active_disk);
+    } else {
+      // Re-mount RAM disk as active disk since HDD does not have .mou
+      active_disk = &ramdisk_device;
+      mount_fat16(active_disk, 0);
+      read_directory(active_disk, root_dir_first_cluster);
+      print_string(23, 45, "RAM disk active (No .mou) ", 0x0E);
     }
   }
 
@@ -1455,6 +1509,9 @@ extern "C" bool shell_mount_disk(int disk_id) {
     if (mount_fat16(disk, 0)) {
       active_disk = disk;
       read_directory(active_disk, root_dir_first_cluster);
+      if (disk == &hdd_device) {
+        create_mou_file_if_needed(disk);
+      }
       return true;
     }
     if (disk == &hdd_device && ata_read_sector(disk, 0, sector_buffer)) {
@@ -1464,6 +1521,7 @@ extern "C" bool shell_mount_disk(int disk_id) {
           if (mount_fat16(disk, mbr->partitions[i].start_lba)) {
             active_disk = disk;
             read_directory(active_disk, root_dir_first_cluster);
+            create_mou_file_if_needed(disk);
             return true;
           }
         }
@@ -1643,6 +1701,7 @@ void file_manager() {
             }
           }
         }
+        create_mou_file_if_needed(active_disk);
       } else if (active_disk == &hdd_device) {
         active_disk = &ramdisk_device;
         mount_fat16(active_disk, 0); // Re-mount RAM disk just in case
@@ -2148,6 +2207,7 @@ void disk_management() {
       if (mount_fat16(dev, offset)) {
         active_disk = dev;
         read_directory(active_disk, root_dir_first_cluster);
+        create_mou_file_if_needed(active_disk);
         print_string(18, 8, "Mounted successfully!         ", 0x0A);
         delay(10);
       } else {
@@ -2618,7 +2678,7 @@ void milla_run_script(const char *script) {
 void milla_lang() {
   clear_screen(0x0F);
   milla_log_count = 0; // Reset log on start
-  milla_print("Welcome to Milla Lang v1.0");
+  milla_print("Welcome to Milla Lang vSun Eclips");
   milla_print("Type HELP for commands. ESC to exit.");
 
   char input[80] = "";
@@ -3320,7 +3380,7 @@ void main_menu() {
 
   for (int i = 0; i < 80; i++)
     print_char(0, i, ' ', 0x1F);
-  print_string(0, 2, "Milla OS 1.0 - Start Menu", 0x1E);
+  print_string(0, 2, "Milla OS Sun Eclips - Start Menu", 0x1E);
 
   draw_window(win_y, win_x, win_height, win_width, " Main Menu ", 0x0B);
 
@@ -3443,7 +3503,7 @@ void main_menu() {
       clear_screen(0x03);
       for (int i = 0; i < 80; i++)
         print_char(0, i, ' ', 0x1F);
-      print_string(0, 2, "Milla OS 1.0 - Start Menu", 0x1E);
+      print_string(0, 2, "Milla OS Sun Eclips - Start Menu", 0x1E);
       draw_window(win_y, win_x, win_height, win_width, " Main Menu ", 0x0B);
     }
   }
@@ -3458,7 +3518,7 @@ void MTop() {
 
   for (int i = 0; i < 80; i++)
     print_char(0, i, ' ', 0x1F);
-  print_string(0, 2, "Milla OS 1.0", 0x1E);
+  print_string(0, 2, "Milla OS Sun Eclips", 0x1E);
   print_string(0, 60, "[F1=STARTMENU]", 0x4F);
 
   // WIDGET: Clock
@@ -3542,7 +3602,7 @@ void MTop() {
       clear_screen(0x03);
       for (int i = 0; i < 80; i++)
         print_char(0, i, ' ', 0x1F);
-      print_string(0, 2, "Milla OS 1.0", 0x1E);
+      print_string(0, 2, "Milla OS Sun Eclips", 0x1E);
       print_string(0, 60, "[F1=MENU]", 0x4F);
       draw_window(3, 10, 12, 60, " Welcome ", 0x0B);
       print_string(5, 15, "Welcome to Milla OS!", 0x70);

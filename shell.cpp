@@ -34,7 +34,7 @@ int shell_get_active_disk();
 bool shell_is_hdd_present();
 // MPra Interpreter API
 bool mpra_is_running();
-const char* mpra_get_window_title();
+const char *mpra_get_window_title();
 int mpra_get_window_w();
 int mpra_get_window_h();
 void mpra_run_file(const char *filename);
@@ -96,6 +96,40 @@ int global_start_color_idx = 0;
 int global_menu_style = 0;
 int global_bar_position = 0; // 0=Top, 1=Bottom
 extern int global_mouse_speed;
+
+// ============================================================================
+// PERSISTENT SETTINGS  (set.con on the mounted volume)
+// Format: one key=value pair per line, terminated by '\n'
+//   wallpaper=N  color=N  menustyle=N  barpos=N  mousespeed=N  language=N
+// Implementations are defined after the static SettingsState ss declaration.
+// ============================================================================
+
+// Helper: append a small integer to a char buffer, return new length
+static int settings_append_int(char *buf, int pos, int val) {
+  char tmp[12];
+  itoa_light(val, tmp);
+  for (int i = 0; tmp[i]; i++)
+    buf[pos++] = tmp[i];
+  return pos;
+}
+
+// Helper: parse integer from string pointer
+static int settings_parse_int(const char *p) {
+  int v = 0;
+  bool neg = false;
+  if (*p == '-') {
+    neg = true;
+    p++;
+  }
+  while (*p >= '0' && *p <= '9') {
+    v = v * 10 + (*p++ - '0');
+  }
+  return neg ? -v : v;
+}
+
+// Forward declarations — bodies defined after static ss is in scope
+void save_settings();
+void load_settings();
 
 extern uint8_t _binary_wp1_raw_start[];
 extern uint8_t _binary_wp2_raw_start[];
@@ -392,8 +426,8 @@ void draw_top_bar() {
 
 void draw_window(int x, int y, int w, int h, const char *title, bool active) {
   draw_rect_alpha(x + 4, y + 4, w, h, 0x000000, 80); // Shadow
-  draw_rect_alpha(x, y, w, h, 0xEEEEEE, 250);
-  draw_rect_alpha(x, y, w, 28, active ? 0x005A9E : 0x777777, 255);
+  draw_rect_alpha(x, y, w, h, 0x1E1E1E, 250);
+  draw_rect_alpha(x, y, w, 28, active ? 0x005A9E : 0x333333, 255);
   draw_string(x + 10, y + 10, title, 0xFFFFFF);
   draw_string(x + w - 40, y + 10, "- x", 0xFFFFFF);
 }
@@ -448,26 +482,26 @@ void draw_file_manager_content(int x, int y, int w, int h, int selected,
   int content_h = h - 28;
 
   // Header bar
-  draw_rect_alpha(x, content_y, w, 20, 0xDDDDDD, 255);
-  draw_string(x + 10, content_y + 6, "Name", 0x333333);
-  draw_string(x + w / 2, content_y + 6, "Size", 0x333333);
-  draw_string(x + w - 80, content_y + 6, "Type", 0x333333);
+  draw_rect_alpha(x, content_y, w, 20, 0x2D2D2D, 255);
+  draw_string(x + 10, content_y + 6, "Name", 0xDDDDDD);
+  draw_string(x + w / 2, content_y + 6, "Size", 0xDDDDDD);
+  draw_string(x + w - 80, content_y + 6, "Type", 0xDDDDDD);
 
   // Separator line
-  draw_rect_alpha(x, content_y + 20, w, 1, 0xBBBBBB, 255);
+  draw_rect_alpha(x, content_y + 20, w, 1, 0x444444, 255);
 
   int row_height = 20;
   int list_y = content_y + 22;
   int max_visible = (content_h - 24) / row_height;
 
   if (!shell_is_fs_mounted()) {
-    draw_string(x + 20, list_y + 20, "No filesystem mounted.", 0x999999);
+    draw_string(x + 20, list_y + 20, "No filesystem mounted.", 0x888888);
     return;
   }
 
   int count = get_shell_file_count();
   if (count == 0) {
-    draw_string(x + 20, list_y + 20, "No files found.", 0x999999);
+    draw_string(x + 20, list_y + 20, "No files found.", 0x888888);
     return;
   }
 
@@ -477,8 +511,8 @@ void draw_file_manager_content(int x, int y, int w, int h, int selected,
 
     // Row background
     uint32_t row_bg =
-        is_selected ? 0x005A9E : ((file_idx % 2 == 0) ? 0xF5F5F5 : 0xEEEEEE);
-    uint32_t text_color = is_selected ? 0xFFFFFF : 0x333333;
+        is_selected ? 0x005A9E : ((file_idx % 2 == 0) ? 0x252526 : 0x1E1E1E);
+    uint32_t text_color = is_selected ? 0xFFFFFF : 0xDDDDDD;
     draw_rect_alpha(x + 1, list_y + i * row_height, w - 2, row_height, row_bg,
                     is_selected ? 255 : 240);
 
@@ -507,8 +541,8 @@ void draw_file_manager_content(int x, int y, int w, int h, int selected,
       thumb_h = 10;
     int thumb_y =
         list_y + (scroll_offset * (bar_h - thumb_h)) / (count - max_visible);
-    draw_rect_alpha(x + w - 6, list_y, 4, bar_h, 0xCCCCCC, 200);
-    draw_rect_alpha(x + w - 6, thumb_y, 4, thumb_h, 0x888888, 255);
+    draw_rect_alpha(x + w - 6, list_y, 4, bar_h, 0x333333, 200);
+    draw_rect_alpha(x + w - 6, thumb_y, 4, thumb_h, 0x666666, 255);
   }
 }
 
@@ -526,11 +560,11 @@ struct CalcState {
 void draw_calculator_content(int x, int y, int w, int h, CalcState &cs) {
   int cy = y + 28;
   // Display area
-  draw_rect_alpha(x + 10, cy + 10, w - 20, 30, 0xFFFFFF, 255);
-  draw_rect_alpha(x + 10, cy + 10, w - 20, 1, 0x999999, 255); // Top border
-  draw_rect_alpha(x + 10, cy + 10, 1, 30, 0x999999, 255);     // Left border
+  draw_rect_alpha(x + 10, cy + 10, w - 20, 30, 0x111111, 255);
+  draw_rect_alpha(x + 10, cy + 10, w - 20, 1, 0x444444, 255); // Top border
+  draw_rect_alpha(x + 10, cy + 10, 1, 30, 0x444444, 255);     // Left border
 
-  draw_string(x + 20, cy + 20, cs.display, 0x000000);
+  draw_string(x + 20, cy + 20, cs.display, 0xFFFFFF);
 
   const char *btns[4][4] = {{"7", "8", "9", "/"},
                             {"4", "5", "6", "*"},
@@ -550,7 +584,7 @@ void draw_calculator_content(int x, int y, int w, int h, CalcState &cs) {
       // Hover effect
       bool hover = (mouse_x >= cur_x && mouse_x < cur_x + bw &&
                     mouse_y >= cur_y && mouse_y < cur_y + bh);
-      uint32_t btn_col = hover ? 0xDDDDDD : 0xCCCCCC;
+      uint32_t btn_col = hover ? 0x444444 : 0x333333;
       if (btns[i][j][0] == '=' || btns[i][j][0] == '+' ||
           btns[i][j][0] == '-' || btns[i][j][0] == '*' ||
           btns[i][j][0] == '/') {
@@ -561,8 +595,7 @@ void draw_calculator_content(int x, int y, int w, int h, CalcState &cs) {
 
       draw_rect_alpha(cur_x, cur_y, bw, bh, btn_col, 255);
       draw_string(cur_x + (bw / 2) - 4, cur_y + (bh / 2) - 4, btns[i][j],
-                  (btn_col == 0xCCCCCC || btn_col == 0xDDDDDD) ? 0x000000
-                                                               : 0xFFFFFF);
+                  0xFFFFFF);
     }
   }
 }
@@ -662,131 +695,105 @@ void draw_settings_content(int x, int y, int w, int h, SettingsState &ss) {
 
   // Tabs
   draw_rect_alpha(x + 10, cy + 10, 120, 25,
-                  ss.current_tab == 0 ? 0x005A9E : 0xCCCCCC, 255);
-  draw_string(x + 30, cy + 18, "Keyboard",
-              ss.current_tab == 0 ? 0xFFFFFF : 0x000000);
+                  ss.current_tab == 0 ? 0x005A9E : 0x333333, 255);
+  draw_string(x + 30, cy + 18, "Keyboard", 0xFFFFFF);
   draw_rect_alpha(x + 140, cy + 10, 120, 25,
-                  ss.current_tab == 1 ? 0x005A9E : 0xCCCCCC, 255);
-  draw_string(x + 150, cy + 18, "Customizing",
-              ss.current_tab == 1 ? 0xFFFFFF : 0x000000);
+                  ss.current_tab == 1 ? 0x005A9E : 0x333333, 255);
+  draw_string(x + 150, cy + 18, "Customizing", 0xFFFFFF);
 
   if (ss.current_tab == 0) {
-    draw_string(x + 10, cy + 50, "Language Settings", 0x333333);
+    draw_string(x + 10, cy + 50, "Language Settings", 0xDDDDDD);
 
     // Buttons for language
     draw_rect_alpha(x + 10, cy + 70, 80, 25,
-                    ss.language == 0 ? 0x005A9E : 0xCCCCCC, 255);
-    draw_string(x + 25, cy + 78, "English",
-                ss.language == 0 ? 0xFFFFFF : 0x000000);
+                    ss.language == 0 ? 0x005A9E : 0x333333, 255);
+    draw_string(x + 25, cy + 78, "English", 0xFFFFFF);
 
     draw_rect_alpha(x + 100, cy + 70, 80, 25,
-                    ss.language == 1 ? 0x005A9E : 0xCCCCCC, 255);
-    draw_string(x + 115, cy + 78, "German",
-                ss.language == 1 ? 0xFFFFFF : 0x000000);
+                    ss.language == 1 ? 0x005A9E : 0x333333, 255);
+    draw_string(x + 115, cy + 78, "German", 0xFFFFFF);
 
     draw_rect_alpha(x + 190, cy + 70, 80, 25,
-                    ss.language == 2 ? 0x005A9E : 0xCCCCCC, 255);
-    draw_string(x + 205, cy + 78, "French",
-                ss.language == 2 ? 0xFFFFFF : 0x000000);
+                    ss.language == 2 ? 0x005A9E : 0x333333, 255);
+    draw_string(x + 205, cy + 78, "French", 0xFFFFFF);
 
-    draw_string(x + 10, cy + 110, "Cursor Speed", 0x333333);
+    draw_string(x + 10, cy + 110, "Cursor Speed", 0xDDDDDD);
     draw_rect_alpha(x + 10, cy + 130, 60, 25,
-                    global_mouse_speed == 0 ? 0x005A9E : 0xCCCCCC, 255);
-    draw_string(x + 20, cy + 138, "Slow",
-                global_mouse_speed == 0 ? 0xFFFFFF : 0x000000);
+                    global_mouse_speed == 0 ? 0x005A9E : 0x333333, 255);
+    draw_string(x + 20, cy + 138, "Slow", 0xFFFFFF);
 
     draw_rect_alpha(x + 80, cy + 130, 60, 25,
-                    global_mouse_speed == 1 ? 0x005A9E : 0xCCCCCC, 255);
-    draw_string(x + 95, cy + 138, "Mid",
-                global_mouse_speed == 1 ? 0xFFFFFF : 0x000000);
+                    global_mouse_speed == 1 ? 0x005A9E : 0x333333, 255);
+    draw_string(x + 95, cy + 138, "Mid", 0xFFFFFF);
 
     draw_rect_alpha(x + 150, cy + 130, 60, 25,
-                    global_mouse_speed == 2 ? 0x005A9E : 0xCCCCCC, 255);
-    draw_string(x + 160, cy + 138, "Norm",
-                global_mouse_speed == 2 ? 0xFFFFFF : 0x000000);
+                    global_mouse_speed == 2 ? 0x005A9E : 0x333333, 255);
+    draw_string(x + 160, cy + 138, "Norm", 0xFFFFFF);
 
     draw_rect_alpha(x + 220, cy + 130, 60, 25,
-                    global_mouse_speed == 3 ? 0x005A9E : 0xCCCCCC, 255);
-    draw_string(x + 230, cy + 138, "Fast",
-                global_mouse_speed == 3 ? 0xFFFFFF : 0x000000);
+                    global_mouse_speed == 3 ? 0x005A9E : 0x333333, 255);
+    draw_string(x + 230, cy + 138, "Fast", 0xFFFFFF);
   } else {
-    draw_string(x + 10, cy + 50, "Wallpaper", 0x333333);
+    draw_string(x + 10, cy + 50, "Wallpaper", 0xDDDDDD);
     draw_rect_alpha(x + 10, cy + 70, 80, 25,
-                    global_wallpaper == 0 ? 0x005A9E : 0xCCCCCC, 255);
-    draw_string(x + 25, cy + 78, "Simple",
-                global_wallpaper == 0 ? 0xFFFFFF : 0x000000);
+                    global_wallpaper == 0 ? 0x005A9E : 0x333333, 255);
+    draw_string(x + 25, cy + 78, "Simple", 0xFFFFFF);
     draw_rect_alpha(x + 100, cy + 70, 80, 25,
-                    global_wallpaper == 1 ? 0x005A9E : 0xCCCCCC, 255);
-    draw_string(x + 120, cy + 78, "Field",
-                global_wallpaper == 1 ? 0xFFFFFF : 0x000000);
+                    global_wallpaper == 1 ? 0x005A9E : 0x333333, 255);
+    draw_string(x + 120, cy + 78, "Field", 0xFFFFFF);
     draw_rect_alpha(x + 190, cy + 70, 80, 25,
-                    global_wallpaper == 2 ? 0x005A9E : 0xCCCCCC, 255);
-    draw_string(x + 215, cy + 78, "Devs",
-                global_wallpaper == 2 ? 0xFFFFFF : 0x000000);
+                    global_wallpaper == 2 ? 0x005A9E : 0x333333, 255);
+    draw_string(x + 215, cy + 78, "Devs", 0xFFFFFF);
 
     draw_rect_alpha(x + 10, cy + 100, 80, 25,
-                    global_wallpaper == 3 ? 0x005A9E : 0xCCCCCC, 255);
-    draw_string(x + 30, cy + 108, "Way",
-                global_wallpaper == 3 ? 0xFFFFFF : 0x000000);
+                    global_wallpaper == 3 ? 0x005A9E : 0x333333, 255);
+    draw_string(x + 30, cy + 108, "Way", 0xFFFFFF);
     draw_rect_alpha(x + 100, cy + 100, 80, 25,
-                    global_wallpaper == 4 ? 0x005A9E : 0xCCCCCC, 255);
-    draw_string(x + 115, cy + 108, "Wonne",
-                global_wallpaper == 4 ? 0xFFFFFF : 0x000000);
+                    global_wallpaper == 4 ? 0x005A9E : 0x333333, 255);
+    draw_string(x + 115, cy + 108, "Wonne", 0xFFFFFF);
     draw_rect_alpha(x + 190, cy + 100, 80, 25,
-                    global_wallpaper == 5 ? 0x005A9E : 0xCCCCCC, 255);
-    draw_string(x + 205, cy + 108, "Forest",
-                global_wallpaper == 5 ? 0xFFFFFF : 0x000000);
+                    global_wallpaper == 5 ? 0x005A9E : 0x333333, 255);
+    draw_string(x + 205, cy + 108, "Forest", 0xFFFFFF);
 
     draw_rect_alpha(x + 10, cy + 130, 80, 25,
-                    global_wallpaper == 6 ? 0x005A9E : 0xCCCCCC, 255);
-    draw_string(x + 25, cy + 138, "Sea 1",
-                global_wallpaper == 6 ? 0xFFFFFF : 0x000000);
+                    global_wallpaper == 6 ? 0x005A9E : 0x333333, 255);
+    draw_string(x + 25, cy + 138, "Sea 1", 0xFFFFFF);
     draw_rect_alpha(x + 100, cy + 130, 80, 25,
-                    global_wallpaper == 7 ? 0x005A9E : 0xCCCCCC, 255);
-    draw_string(x + 115, cy + 138, "Sea 2",
-                global_wallpaper == 7 ? 0xFFFFFF : 0x000000);
+                    global_wallpaper == 7 ? 0x005A9E : 0x333333, 255);
+    draw_string(x + 115, cy + 138, "Sea 2", 0xFFFFFF);
     draw_rect_alpha(x + 190, cy + 130, 80, 25,
-                    global_wallpaper == 8 ? 0x005A9E : 0xCCCCCC, 255);
-    draw_string(x + 205, cy + 138, "Sunset",
-                global_wallpaper == 8 ? 0xFFFFFF : 0x000000);
+                    global_wallpaper == 8 ? 0x005A9E : 0x333333, 255);
+    draw_string(x + 205, cy + 138, "Sunset", 0xFFFFFF);
 
-    draw_string(x + 10, cy + 165, "Start Color", 0x333333);
+    draw_string(x + 10, cy + 165, "Start Color", 0xDDDDDD);
     draw_rect_alpha(x + 10, cy + 185, 60, 25,
-                    global_start_color_idx == 0 ? 0x005A9E : 0xCCCCCC, 255);
-    draw_string(x + 25, cy + 193, "Red",
-                global_start_color_idx == 0 ? 0xFFFFFF : 0x000000);
+                    global_start_color_idx == 0 ? 0x005A9E : 0x333333, 255);
+    draw_string(x + 25, cy + 193, "Red", 0xFFFFFF);
     draw_rect_alpha(x + 80, cy + 185, 60, 25,
-                    global_start_color_idx == 1 ? 0x005A9E : 0xCCCCCC, 255);
-    draw_string(x + 90, cy + 193, "Blue",
-                global_start_color_idx == 1 ? 0xFFFFFF : 0x000000);
+                    global_start_color_idx == 1 ? 0x005A9E : 0x333333, 255);
+    draw_string(x + 90, cy + 193, "Blue", 0xFFFFFF);
     draw_rect_alpha(x + 150, cy + 185, 60, 25,
-                    global_start_color_idx == 2 ? 0x005A9E : 0xCCCCCC, 255);
-    draw_string(x + 155, cy + 193, "Green",
-                global_start_color_idx == 2 ? 0xFFFFFF : 0x000000);
+                    global_start_color_idx == 2 ? 0x005A9E : 0x333333, 255);
+    draw_string(x + 155, cy + 193, "Green", 0xFFFFFF);
     draw_rect_alpha(x + 220, cy + 185, 60, 25,
-                    global_start_color_idx == 3 ? 0x005A9E : 0xCCCCCC, 255);
-    draw_string(x + 230, cy + 193, "Dark",
-                global_start_color_idx == 3 ? 0xFFFFFF : 0x000000);
+                    global_start_color_idx == 3 ? 0x005A9E : 0x333333, 255);
+    draw_string(x + 230, cy + 193, "Dark", 0xFFFFFF);
 
-    draw_string(x + 10, cy + 225, "Menu Style", 0x333333);
+    draw_string(x + 10, cy + 225, "Menu Style", 0xDDDDDD);
     draw_rect_alpha(x + 10, cy + 245, 80, 25,
-                    global_menu_style == 0 ? 0x005A9E : 0xCCCCCC, 255);
-    draw_string(x + 15, cy + 253, "Centered",
-                global_menu_style == 0 ? 0xFFFFFF : 0x000000);
+                    global_menu_style == 0 ? 0x005A9E : 0x333333, 255);
+    draw_string(x + 15, cy + 253, "Centered", 0xFFFFFF);
     draw_rect_alpha(x + 100, cy + 245, 80, 25,
-                    global_menu_style == 1 ? 0x005A9E : 0xCCCCCC, 255);
-    draw_string(x + 105, cy + 253, "Right Edge",
-                global_menu_style == 1 ? 0xFFFFFF : 0x000000);
+                    global_menu_style == 1 ? 0x005A9E : 0x333333, 255);
+    draw_string(x + 105, cy + 253, "Right Edge", 0xFFFFFF);
 
-    draw_string(x + 10, cy + 275, "Bar Position", 0x333333);
+    draw_string(x + 10, cy + 275, "Bar Position", 0xDDDDDD);
     draw_rect_alpha(x + 10, cy + 295, 80, 25,
-                    global_bar_position == 0 ? 0x005A9E : 0xCCCCCC, 255);
-    draw_string(x + 30, cy + 303, "Top",
-                global_bar_position == 0 ? 0xFFFFFF : 0x000000);
+                    global_bar_position == 0 ? 0x005A9E : 0x333333, 255);
+    draw_string(x + 30, cy + 303, "Top", 0xFFFFFF);
     draw_rect_alpha(x + 100, cy + 295, 80, 25,
-                    global_bar_position == 1 ? 0x005A9E : 0xCCCCCC, 255);
-    draw_string(x + 115, cy + 303, "Bottom",
-                global_bar_position == 1 ? 0xFFFFFF : 0x000000);
+                    global_bar_position == 1 ? 0x005A9E : 0x333333, 255);
+    draw_string(x + 115, cy + 303, "Bottom", 0xFFFFFF);
   }
 }
 
@@ -796,7 +803,7 @@ void draw_settings_content(int x, int y, int w, int h, SettingsState &ss) {
 
 void draw_disk_manager_content(int x, int y, int w, int h) {
   int cy = y + 28;
-  draw_string(x + 10, cy + 10, "Disk Manager", 0x333333);
+  draw_string(x + 10, cy + 10, "Disk Manager", 0xDDDDDD);
 
   int active_disk = shell_get_active_disk();
   bool hdd_present = shell_is_hdd_present();
@@ -817,12 +824,12 @@ void draw_disk_manager_content(int x, int y, int w, int h) {
     string_copy(disk_info + string_length(disk_info), "Not mounted");
   }
 
-  draw_string(x + 10, cy + 35, disk_info, 0x000000);
+  draw_string(x + 10, cy + 35, disk_info, 0xFFFFFF);
 
-  draw_rect_alpha(x, cy + 55, w, 1, 0xCCCCCC, 255);
+  draw_rect_alpha(x, cy + 55, w, 1, 0x444444, 255);
 
   // RAM Disk Buttons
-  draw_string(x + 10, cy + 65, "RAM Disk:", 0x333333);
+  draw_string(x + 10, cy + 65, "RAM Disk:", 0xDDDDDD);
   draw_rect_alpha(x + 10, cy + 85, 120, 25, 0x005A9E, 255);
   draw_string(x + 20, cy + 93, "Mount RAM", 0xFFFFFF);
   draw_rect_alpha(x + 140, cy + 85, 120, 25, 0xEE7700, 255);
@@ -830,7 +837,7 @@ void draw_disk_manager_content(int x, int y, int w, int h) {
 
   // HDD Buttons
   draw_string(x + 10, cy + 125,
-              hdd_present ? "Hard Disk:" : "Hard Disk: Not Found", 0x333333);
+              hdd_present ? "Hard Disk:" : "Hard Disk: Not Found", 0xDDDDDD);
   if (hdd_present) {
     draw_rect_alpha(x + 10, cy + 145, 120, 25, 0x005A9E, 255);
     draw_string(x + 20, cy + 153, "Mount HDD", 0xFFFFFF);
@@ -846,10 +853,12 @@ void draw_disk_manager_content(int x, int y, int w, int h) {
 bool handle_disk_manager_click(int x, int y, int w) {
   int cy = y + 28;
   bool disk_changed = false;
+  bool mounted_new = false;
 
   if (mouse_y >= cy + 85 && mouse_y <= cy + 110) {
     if (mouse_x >= x + 10 && mouse_x <= x + 130) {
-      shell_mount_disk(1);
+      if (shell_mount_disk(1))
+        mounted_new = true;
       disk_changed = true;
     } // Mount RAM
     else if (mouse_x >= x + 140 && mouse_x <= x + 260) {
@@ -861,7 +870,8 @@ bool handle_disk_manager_click(int x, int y, int w) {
   bool hdd_present = shell_is_hdd_present();
   if (hdd_present && mouse_y >= cy + 145 && mouse_y <= cy + 170) {
     if (mouse_x >= x + 10 && mouse_x <= x + 130) {
-      shell_mount_disk(2);
+      if (shell_mount_disk(2))
+        mounted_new = true;
       disk_changed = true;
     } // Mount HDD
     else if (mouse_x >= x + 140 && mouse_x <= x + 260) {
@@ -877,11 +887,16 @@ bool handle_disk_manager_click(int x, int y, int w) {
     }
   }
 
+  // After mounting a new volume, load settings from set.con (if present)
+  if (mounted_new)
+    load_settings();
+
   return disk_changed;
 }
 
 void handle_settings_click(SettingsState &ss, int x, int y) {
   int cy = y + 28;
+  bool setting_changed = false;
 
   // Tab clicks
   if (mouse_y >= cy + 10 && mouse_y <= cy + 35) {
@@ -901,6 +916,7 @@ void handle_settings_click(SettingsState &ss, int x, int y) {
       else if (mouse_x >= x + 190 && mouse_x <= x + 270)
         ss.language = 2;
       shell_set_language(ss.language);
+      setting_changed = true;
     }
     // Mouse speed clicks
     if (mouse_y >= cy + 130 && mouse_y <= cy + 155) {
@@ -912,6 +928,7 @@ void handle_settings_click(SettingsState &ss, int x, int y) {
         global_mouse_speed = 2;
       else if (mouse_x >= x + 220 && mouse_x <= x + 280)
         global_mouse_speed = 3;
+      setting_changed = true;
     }
   } else {
     // Wallpaper clicks
@@ -922,6 +939,7 @@ void handle_settings_click(SettingsState &ss, int x, int y) {
         global_wallpaper = 1;
       else if (mouse_x >= x + 190 && mouse_x <= x + 270)
         global_wallpaper = 2;
+      setting_changed = true;
     }
     if (mouse_y >= cy + 100 && mouse_y <= cy + 125) {
       if (mouse_x >= x + 10 && mouse_x <= x + 90)
@@ -930,6 +948,7 @@ void handle_settings_click(SettingsState &ss, int x, int y) {
         global_wallpaper = 4;
       else if (mouse_x >= x + 190 && mouse_x <= x + 270)
         global_wallpaper = 5;
+      setting_changed = true;
     }
     if (mouse_y >= cy + 130 && mouse_y <= cy + 155) {
       if (mouse_x >= x + 10 && mouse_x <= x + 90)
@@ -938,6 +957,7 @@ void handle_settings_click(SettingsState &ss, int x, int y) {
         global_wallpaper = 7;
       else if (mouse_x >= x + 190 && mouse_x <= x + 270)
         global_wallpaper = 8;
+      setting_changed = true;
     }
     // Start color clicks
     if (mouse_y >= cy + 185 && mouse_y <= cy + 210) {
@@ -949,6 +969,7 @@ void handle_settings_click(SettingsState &ss, int x, int y) {
         global_start_color_idx = 2;
       else if (mouse_x >= x + 220 && mouse_x <= x + 280)
         global_start_color_idx = 3;
+      setting_changed = true;
     }
     // Menu style clicks
     if (mouse_y >= cy + 245 && mouse_y <= cy + 270) {
@@ -956,6 +977,7 @@ void handle_settings_click(SettingsState &ss, int x, int y) {
         global_menu_style = 0;
       else if (mouse_x >= x + 100 && mouse_x <= x + 180)
         global_menu_style = 1;
+      setting_changed = true;
     }
     // Bar position clicks
     if (mouse_y >= cy + 295 && mouse_y <= cy + 320) {
@@ -963,8 +985,13 @@ void handle_settings_click(SettingsState &ss, int x, int y) {
         global_bar_position = 0;
       else if (mouse_x >= x + 100 && mouse_x <= x + 180)
         global_bar_position = 1;
+      setting_changed = true;
     }
   }
+
+  // Persist any changed setting immediately to set.con
+  if (setting_changed)
+    save_settings();
 }
 
 // ============================================================================
@@ -1106,7 +1133,7 @@ int get_cell_int(SheetState &ss, int col, int row, int depth) {
 void draw_sheet_content(int x, int y, int w, int h, SheetState &ss) {
   int cy = y + 28;
   // Toolbar
-  draw_rect_alpha(x, cy, w, 30, 0xEEEEEE, 255);
+  draw_rect_alpha(x, cy, w, 30, 0x2D2D2D, 255);
 
   // Save/Load buttons
   draw_rect_alpha(x + 10, cy + 5, 50, 20, 0x107C10, 255); // tabels green
@@ -1115,7 +1142,7 @@ void draw_sheet_content(int x, int y, int w, int h, SheetState &ss) {
   draw_rect_alpha(x + 70, cy + 5, 50, 20, 0x107C10, 255);
   draw_string(x + 75, cy + 11, "Load", 0xFFFFFF);
 
-  draw_string(x + 130, cy + 11, ss.filename, 0x333333);
+  draw_string(x + 130, cy + 11, ss.filename, 0xDDDDDD);
 
   int grid_y = cy + 30;
   int cell_w = (w - 20) / 6;
@@ -1124,9 +1151,9 @@ void draw_sheet_content(int x, int y, int w, int h, SheetState &ss) {
   // Draw Column Headers (A-F)
   for (int col = 0; col < 6; col++) {
     char label[2] = {(char)('A' + col), '\0'};
-    draw_rect_alpha(x + col * cell_w, grid_y, cell_w, 20, 0xCCCCCC, 255);
+    draw_rect_alpha(x + col * cell_w, grid_y, cell_w, 20, 0x333333, 255);
     draw_string(x + col * cell_w + (cell_w / 2) - 4, grid_y + 6, label,
-                0x000000);
+                0xFFFFFF);
   }
 
   // Draw grid
@@ -1135,17 +1162,17 @@ void draw_sheet_content(int x, int y, int w, int h, SheetState &ss) {
       int cx = x + col * cell_w;
       int cy_cell = grid_y + 20 + row * cell_h;
 
-      uint32_t bg = (ss.sel_x == col && ss.sel_y == row) ? 0xCCFFCC : 0xFFFFFF;
+      uint32_t bg = (ss.sel_x == col && ss.sel_y == row) ? 0x0E5A0E : 0x1E1E1E;
       draw_rect_alpha(cx, cy_cell, cell_w, cell_h, bg, 255);
 
       // Border
-      draw_rect_alpha(cx, cy_cell, cell_w, 1, 0xBBBBBB, 255);
-      draw_rect_alpha(cx, cy_cell, 1, cell_h, 0xBBBBBB, 255);
+      draw_rect_alpha(cx, cy_cell, cell_w, 1, 0x3A3A3C, 255);
+      draw_rect_alpha(cx, cy_cell, 1, cell_h, 0x3A3A3C, 255);
 
       if (ss.sel_x == col && ss.sel_y == row) {
         // Show formula while editing
         draw_string(cx + 4, cy_cell + (cell_h / 2) - 4, ss.cells[col][row],
-                    0x000000);
+                    0xFFFFFF);
       } else {
         // Show result
         if (ss.cells[col][row][0] == '=') {
@@ -1153,17 +1180,17 @@ void draw_sheet_content(int x, int y, int w, int h, SheetState &ss) {
           char buf[16];
           itoa_light(val, buf);
           draw_string(cx + 4, cy_cell + (cell_h / 2) - 4, buf,
-                      0x015A01); // Dark green for formulas
+                      0x4CAF50); // Bright green for formulas in dark mode
         } else {
           draw_string(cx + 4, cy_cell + (cell_h / 2) - 4, ss.cells[col][row],
-                      0x000000);
+                      0xFFFFFF);
         }
       }
     }
   }
 
   if (ss.show_open_dialog) {
-    draw_rect_alpha(x + 20, y + 60, w - 40, h - 100, 0xFFFFFF, 255);
+    draw_rect_alpha(x + 20, y + 60, w - 40, h - 100, 0x252526, 255);
     draw_rect_alpha(x + 20, y + 60, w - 40, 25, 0x107C10, 255);
     draw_string(x + 30, y + 68, "Select File (.SHT)", 0xFFFFFF);
 
@@ -1173,7 +1200,7 @@ void draw_sheet_content(int x, int y, int w, int h, SheetState &ss) {
       char name[16];
       get_shell_file_name(i, name);
       if (!get_shell_file_is_dir(i)) {
-        draw_string(x + 30, y + 95 + visible * 20, name, 0x000000);
+        draw_string(x + 30, y + 95 + visible * 20, name, 0xFFFFFF);
         visible++;
       }
     }
@@ -1250,7 +1277,7 @@ bool handle_sheet_click(SheetState &ss, int x, int y, int w, int h) {
 void draw_word_content(int x, int y, int w, int h, WordState &ws) {
   int cy = y + 28;
   // Toolbar
-  draw_rect_alpha(x, cy, w, 30, 0xDDDDDD, 255);
+  draw_rect_alpha(x, cy, w, 30, 0x2D2D2D, 255);
 
   // Save/Load buttons
   draw_rect_alpha(x + 10, cy + 5, 60, 20, 0x005A9E, 255);
@@ -1259,33 +1286,31 @@ void draw_word_content(int x, int y, int w, int h, WordState &ws) {
   draw_rect_alpha(x + 80, cy + 5, 60, 20, 0x005A9E, 255);
   draw_string(x + 90, cy + 11, "Load", 0xFFFFFF);
 
-  draw_string(x + 150, cy + 11, "File:", 0x333333);
+  draw_string(x + 150, cy + 11, "File:", 0xDDDDDD);
 
   draw_rect_alpha(x + 190, cy + 5, 100, 20,
-                  ws.editing_filename ? 0xBBBBBB : 0xFFFFFF, 255);
-  draw_string(x + 195, cy + 11, ws.filename, 0x000000);
+                  ws.editing_filename ? 0x444444 : 0x1E1E1E, 255);
+  draw_string(x + 195, cy + 11, ws.filename, 0xFFFFFF);
 
   if (ws.show_open_dialog) {
-    draw_rect_alpha(x + 10, cy + 40, w - 20, h - 75, 0xEEEEEE, 255);
+    draw_rect_alpha(x + 10, cy + 40, w - 20, h - 75, 0x252526, 255);
     int list_y = cy + 45;
     int count = get_shell_file_count();
-    draw_string(x + 15, list_y, "Select a file to load:", 0x000000);
+    draw_string(x + 15, list_y, "Select a file to load:", 0xFFFFFF);
     for (int i = 0; i < count && i < 10; i++) {
       char name[16];
       get_shell_file_name(i, name);
-      draw_rect_alpha(x + 15, list_y + 20 + i * 20, w - 30, 18, 0xFFFFFF, 255);
-      draw_string(x + 20, list_y + 25 + i * 20, name, 0x000000);
+      draw_rect_alpha(x + 15, list_y + 20 + i * 20, w - 30, 18, 0x333333, 255);
+      draw_string(x + 20, list_y + 25 + i * 20, name, 0xFFFFFF);
     }
     return; // Don't draw text area behind
   }
 
   // Text area
-  draw_rect_alpha(x + 10, cy + 40, w - 20, h - 75, 0xFFFFFF, 255);
-  draw_rect_alpha(x + 10, cy + 40, w - 20, h - 75, 0x999999,
-                  255); // wait, to draw black outline I'd need edges
+  draw_rect_alpha(x + 10, cy + 40, w - 20, h - 75, 0x1E1E1E, 255);
   // Just draw a thin outline manually:
-  draw_rect_alpha(x + 10, cy + 40, w - 20, 1, 0x999999, 255);
-  draw_rect_alpha(x + 10, cy + 40, 1, h - 75, 0x999999, 255);
+  draw_rect_alpha(x + 10, cy + 40, w - 20, 1, 0x444444, 255);
+  draw_rect_alpha(x + 10, cy + 40, 1, h - 75, 0x444444, 255);
 
   // Draw text
   int tx = x + 15;
@@ -1295,7 +1320,7 @@ void draw_word_content(int x, int y, int w, int h, WordState &ws) {
       // Draw cursor (blinking)
       Time t = get_time();
       if (t.second % 2 == 0) {
-        draw_rect_alpha(tx, ty, 6, 12, 0x000000, 255);
+        draw_rect_alpha(tx, ty, 6, 12, 0xFFFFFF, 255);
       }
       break;
     }
@@ -1307,7 +1332,7 @@ void draw_word_content(int x, int y, int w, int h, WordState &ws) {
       tx = x + 15;
       ty += 14;
     } else {
-      draw_char(tx, ty, c, 0x000000);
+      draw_char(tx, ty, c, 0xFFFFFF);
       tx += 8;
       if (tx > x + w - 25) {
         tx = x + 15;
@@ -1423,6 +1448,130 @@ static WordState ws;
 static SheetState sss;
 static SettingsState ss = {0}; // 0 = EN
 
+// ============================================================================
+// PERSISTENT SETTINGS - implementation (ss is now in scope)
+// ============================================================================
+
+void save_settings() {
+  if (!shell_is_fs_mounted())
+    return;
+
+  char buf[256];
+  int pos = 0;
+
+  const char *k0 = "wallpaper=";
+  for (int i = 0; k0[i]; i++)
+    buf[pos++] = k0[i];
+  pos = settings_append_int(buf, pos, global_wallpaper);
+  buf[pos++] = '\n';
+
+  const char *k1 = "color=";
+  for (int i = 0; k1[i]; i++)
+    buf[pos++] = k1[i];
+  pos = settings_append_int(buf, pos, global_start_color_idx);
+  buf[pos++] = '\n';
+
+  const char *k2 = "menustyle=";
+  for (int i = 0; k2[i]; i++)
+    buf[pos++] = k2[i];
+  pos = settings_append_int(buf, pos, global_menu_style);
+  buf[pos++] = '\n';
+
+  const char *k3 = "barpos=";
+  for (int i = 0; k3[i]; i++)
+    buf[pos++] = k3[i];
+  pos = settings_append_int(buf, pos, global_bar_position);
+  buf[pos++] = '\n';
+
+  const char *k4 = "mousespeed=";
+  for (int i = 0; k4[i]; i++)
+    buf[pos++] = k4[i];
+  pos = settings_append_int(buf, pos, global_mouse_speed);
+  buf[pos++] = '\n';
+
+  const char *k5 = "language=";
+  for (int i = 0; k5[i]; i++)
+    buf[pos++] = k5[i];
+  pos = settings_append_int(buf, pos, ss.language);
+  buf[pos++] = '\n';
+
+  buf[pos] = '\0';
+  shell_write_file("set.con", buf, pos);
+}
+
+void load_settings() {
+  if (!shell_is_fs_mounted())
+    return;
+
+  char buf[256];
+  buf[0] = '\0';
+  if (!shell_read_file("SET.CON", buf, 255))
+    return;
+  buf[255] = '\0';
+
+  const char *p = buf;
+  while (*p) {
+    const char *line_start = p;
+    while (*p && *p != '=' && *p != '\n')
+      p++;
+    if (*p != '=') {
+      while (*p && *p != '\n')
+        p++;
+      if (*p == '\n')
+        p++;
+      continue;
+    }
+    int key_len = (int)(p - line_start);
+    p++; // skip '='
+    int val = settings_parse_int(p);
+    while (*p && *p != '\n')
+      p++;
+    if (*p == '\n')
+      p++;
+
+    // Match known keys by length + content
+    if (key_len == 9 && line_start[0] == 'w' && line_start[1] == 'a' &&
+        line_start[2] == 'l' && line_start[3] == 'l' && line_start[4] == 'p' &&
+        line_start[5] == 'a' && line_start[6] == 'p' && line_start[7] == 'e' &&
+        line_start[8] == 'r') {
+      if (val >= 0 && val <= 8)
+        global_wallpaper = val;
+    } else if (key_len == 5 && line_start[0] == 'c' && line_start[1] == 'o' &&
+               line_start[2] == 'l' && line_start[3] == 'o' &&
+               line_start[4] == 'r') {
+      if (val >= 0 && val <= 3)
+        global_start_color_idx = val;
+    } else if (key_len == 9 && line_start[0] == 'm' && line_start[1] == 'e' &&
+               line_start[2] == 'n' && line_start[3] == 'u' &&
+               line_start[4] == 's' && line_start[5] == 't' &&
+               line_start[6] == 'y' && line_start[7] == 'l' &&
+               line_start[8] == 'e') {
+      if (val >= 0 && val <= 1)
+        global_menu_style = val;
+    } else if (key_len == 6 && line_start[0] == 'b' && line_start[1] == 'a' &&
+               line_start[2] == 'r' && line_start[3] == 'p' &&
+               line_start[4] == 'o' && line_start[5] == 's') {
+      if (val >= 0 && val <= 1)
+        global_bar_position = val;
+    } else if (key_len == 10 && line_start[0] == 'm' && line_start[1] == 'o' &&
+               line_start[2] == 'u' && line_start[3] == 's' &&
+               line_start[4] == 'e' && line_start[5] == 's' &&
+               line_start[6] == 'p' && line_start[7] == 'e' &&
+               line_start[8] == 'e' && line_start[9] == 'd') {
+      if (val >= 0 && val <= 3)
+        global_mouse_speed = val;
+    } else if (key_len == 8 && line_start[0] == 'l' && line_start[1] == 'a' &&
+               line_start[2] == 'n' && line_start[3] == 'g' &&
+               line_start[4] == 'u' && line_start[5] == 'a' &&
+               line_start[6] == 'g' && line_start[7] == 'e') {
+      if (val >= 0 && val <= 2) {
+        ss.language = val;
+        shell_set_language(val);
+      }
+    }
+  }
+}
+
 static int fm_selected = 0;
 static int fm_scroll = 0;
 static bool fm_files_loaded = false;
@@ -1433,26 +1582,27 @@ void draw_all_ui(WinState &welcome, WinState &fm, WinState &calc,
                  WinState &disk_manager, CalcState &cs, WordState &ws,
                  SheetState &sss, SettingsState &ss, int fm_selected,
                  int fm_scroll) {
+  load_settings();
   draw_wallpaper();
 
   // Draw Welcome window
   if (welcome.open) {
     if (!welcome.minimized) {
-      draw_window(welcome.x, welcome.y, welcome.w, welcome.h, "Milla Welcome",
-                  true);
-      draw_string(welcome.x + 20, welcome.y + 50, "Welcome to Milla OS 2.1",
-                  0x000000);
+      draw_window(welcome.x, welcome.y, welcome.w, welcome.h,
+                  "Welcome to Sun Eclips", true);
+      draw_string(welcome.x + 20, welcome.y + 50,
+                  "Welcome to Milla OS Sun Eclips", 0xFFFFFF);
       draw_image_scaled(welcome.x + 20, welcome.y + 80, 100, 100,
                         _binary_logo1_raw_start, 1024, 1024);
       draw_string(welcome.x + 140, welcome.y + 80,
-                  "Milla OS is a FOSS Operating System.", 0x333333);
+                  "Milla OS Sun Eclips is a FOSS Operating System.", 0xDDDDDD);
       draw_string(welcome.x + 140, welcome.y + 100,
-                  "Written in C++ in Germany.", 0x333333);
-      draw_rect_alpha(welcome.x + 20, welcome.y + 200, 500, 1, 0xCCCCCC, 255);
+                  "Written in C++ in Germany.", 0xDDDDDD);
+      draw_rect_alpha(welcome.x + 20, welcome.y + 200, 500, 1, 0x444444, 255);
       draw_image_scaled(welcome.x + 20, welcome.y + 220, 80, 80,
                         _binary_logo2_raw_start, 460, 460);
       draw_string(welcome.x + 120, welcome.y + 220,
-                  "(c) 2025 - 2026 @FloriDevs", 0x555555);
+                  "(c) 2025 - 2026 codeberg.orgFloriDevs", 0xAAAAAA);
     } else {
       draw_window(welcome.x, welcome.y, welcome.w, 28, "Milla Welcome", true);
     }
@@ -1525,10 +1675,12 @@ void draw_all_ui(WinState &welcome, WinState &fm, WinState &calc,
   // Draw MPra window
   if (mpra_win.open) {
     if (!mpra_win.minimized) {
-      draw_window(mpra_win.x, mpra_win.y, mpra_win.w, mpra_win.h, mpra_get_window_title(), true);
+      draw_window(mpra_win.x, mpra_win.y, mpra_win.w, mpra_win.h,
+                  mpra_get_window_title(), true);
       mpra_draw_content(mpra_win.x, mpra_win.y, mpra_win.w, mpra_win.h);
     } else {
-      draw_window(mpra_win.x, mpra_win.y, mpra_win.w, 28, mpra_get_window_title(), true);
+      draw_window(mpra_win.x, mpra_win.y, mpra_win.w, 28,
+                  mpra_get_window_title(), true);
     }
   }
 
@@ -1554,7 +1706,7 @@ void draw_menu_dropdown() {
   draw_rect_alpha(mx, my, mw, mh, 0x000000, 180);
 
   const char *labels[7] = {"Welcome",     "File Manager", "Calculator",
-                           "Documents",   "tabels",       "Settings",
+                           "Documents",   "Spreadsheet",  "Settings",
                            "Disk Manager"};
   for (int i = 0; i < item_count; i++) {
     int iy = my + 5 + i * item_h;
@@ -1592,7 +1744,8 @@ bool handle_window_titlebar(WinState &win, int mx, int my, bool clicked) {
 }
 
 extern "C" void mpra_trigger_redraw() {
-  draw_all_ui(welcome, fm, calc, word, tabels, settings, disk_manager, cs, ws, sss, ss, fm_selected, fm_scroll);
+  draw_all_ui(welcome, fm, calc, word, tabels, settings, disk_manager, cs, ws,
+              sss, ss, fm_selected, fm_scroll);
   if (menu_open)
     draw_menu_dropdown();
 
@@ -1600,8 +1753,10 @@ extern "C" void mpra_trigger_redraw() {
   for (int y = 0; y < (int)screen.height; y++) {
     for (int x = 0; x < (int)screen.width; x++) {
       uint32_t pixel = ui_buffer[y * screen.width + x];
-      if (x == mouse_x && y >= mouse_y - 5 && y <= mouse_y + 5) pixel = 0xFFFFFF;
-      if (y == mouse_y && x >= mouse_x - 5 && x <= mouse_x + 5) pixel = 0xFFFFFF;
+      if (x == mouse_x && y >= mouse_y - 5 && y <= mouse_y + 5)
+        pixel = 0xFFFFFF;
+      if (y == mouse_y && x >= mouse_x - 5 && x <= mouse_x + 5)
+        pixel = 0xFFFFFF;
       if (frontbuffer[y * screen.width + x] != pixel) {
         frontbuffer[y * screen.width + x] = pixel;
         put_pixel(x, y, pixel);
@@ -1617,12 +1772,15 @@ extern "C" void mpra_delay(int seconds) {
     Time now = get_time();
     int now_sec = now.hour * 3600 + now.minute * 60 + now.second;
     int diff = now_sec - start_sec;
-    if (diff < 0) diff += 24 * 3600;
-    if (diff >= seconds) break;
+    if (diff < 0)
+      diff += 24 * 3600;
+    if (diff >= seconds)
+      break;
 
     mpra_trigger_redraw();
 
-    for (int k = 0; k < 10000; k++) asm volatile("nop");
+    for (int k = 0; k < 10000; k++)
+      asm volatile("nop");
   }
 }
 
@@ -1681,6 +1839,11 @@ extern "C" void start_graphical_shell() {
   fm_files_loaded = false;
   menu_open = false;
 
+  // Load persistent settings from set.con if a volume is already mounted
+  load_settings();
+  // Apply the potentially-loaded language to the kernel scancode mapper
+  shell_set_language(ss.language);
+
   bool last_mouse_left_state = false;
 
   int menu_btn_x = screen.width - 70;
@@ -1703,7 +1866,8 @@ extern "C" void start_graphical_shell() {
       needs_redraw = true;
     }
 
-    if (scancode != 0 && mpra_win.open && !mpra_win.minimized && !mpra_win.dragging) {
+    if (scancode != 0 && mpra_win.open && !mpra_win.minimized &&
+        !mpra_win.dragging) {
       mpra_handle_key(scancode);
       needs_redraw = true;
     }
@@ -1878,10 +2042,10 @@ extern "C" void start_graphical_shell() {
             int name_len = string_length(name);
             bool is_mpra = false;
             if (name_len > 4) {
-              if (name[name_len-4] == '.' &&
-                  (name[name_len-3] == 'm' || name[name_len-3] == 'M') &&
-                  (name[name_len-2] == 'r' || name[name_len-2] == 'R') &&
-                  (name[name_len-1] == 'u' || name[name_len-1] == 'U')) {
+              if (name[name_len - 4] == '.' &&
+                  (name[name_len - 3] == 'm' || name[name_len - 3] == 'M') &&
+                  (name[name_len - 2] == 'r' || name[name_len - 2] == 'R') &&
+                  (name[name_len - 1] == 'u' || name[name_len - 1] == 'U')) {
                 is_mpra = true;
               }
             }
@@ -1918,15 +2082,16 @@ extern "C" void start_graphical_shell() {
 
     // --- Title bar interactions ---
     if (mouse_clicked) {
-      // Priority: Disk Manager > Settings > tabels > Word > Calculator > FM > MPra >
-      // Welcome
+      // Priority: Disk Manager > Settings > tabels > Word > Calculator > FM >
+      // MPra > Welcome
       if (!handle_window_titlebar(disk_manager, mouse_x, mouse_y, true)) {
         if (!handle_window_titlebar(settings, mouse_x, mouse_y, true)) {
           if (!handle_window_titlebar(tabels, mouse_x, mouse_y, true)) {
             if (!handle_window_titlebar(word, mouse_x, mouse_y, true)) {
               if (!handle_window_titlebar(calc, mouse_x, mouse_y, true)) {
                 if (!handle_window_titlebar(fm, mouse_x, mouse_y, true)) {
-                  if (!handle_window_titlebar(mpra_win, mouse_x, mouse_y, true)) {
+                  if (!handle_window_titlebar(mpra_win, mouse_x, mouse_y,
+                                              true)) {
                     handle_window_titlebar(welcome, mouse_x, mouse_y, true);
                   }
                 }
