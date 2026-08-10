@@ -103,7 +103,7 @@ cp grub.cfg isodir/boot/grub/grub.cfg
 
 # 6. Bootfähiges ISO-Image erstellen
 echo "6. Erstelle die bootfähige ISO-Datei mit grub-mkrescue..."
-grub-mkrescue -o myos.iso isodir
+grub-mkrescue -o os.iso isodir
 if [ $? -ne 0 ]; then
     echo "Fehler beim Erstellen der ISO-Datei."
     exit 1
@@ -114,4 +114,4 @@ echo "7. Lösche temporäre Dateien..."
 rm -rf isodir kernel.o shell.o mpra.o kernel.bin kernel-classic.o kernel-classic.bin *.raw *.o
 
 echo "--- Build-Prozess abgeschlossen! ---"
-echo "Die bootfähige Datei 'myos.iso' wurde erfolgreich erstellt."
+echo "Die bootfähige Datei 'os.iso' wurde erfolgreich erstellt."
