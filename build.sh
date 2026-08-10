@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Ins Verzeichnis des Skripts wechseln
+cd "$(dirname "$0")"
+
 # Dieses Skript automatisiert den Bauprozess, um einen Multiboot-kompatiblen Kernel
 # und eine bootfähige ISO-Datei mit GRUB zu erstellen.
 
@@ -22,6 +25,12 @@ then
     exit 1
 fi
 
+if ! command -v mformat &> /dev/null
+then
+    echo "mformat wurde nicht gefunden. Bitte installiere 'mtools' mit 'sudo apt install mtools'."
+    exit 1
+fi
+
 echo "--- Starte den Build-Prozess ---"
 
 # 1. Kernel kompilieren
@@ -32,7 +41,7 @@ g++ -m32 -ffreestanding -fno-pie -c shell.cpp -o shell.o
 g++ -m32 -ffreestanding -fno-pie -c mpra.cpp -o mpra.o
 g++ -m32 -ffreestanding -fno-pie -c mos-classic.cpp -o kernel-classic.o
 
-# Wallpaper und Icons vorbereiten
+# Wallpaper und Logos vorbereiten
 echo "1b. Bereite Medien-Assets vor..."
 convert "wallpapers/MillaOS-simple.png" -resize 800x600! -depth 8 rgba:wp1.raw
 objcopy -I binary -O elf32-i386 -B i386 wp1.raw wp1.o
@@ -52,12 +61,6 @@ convert "wallpapers/frozen sea.jpg" -resize 800x600! -depth 8 rgba:wp8.raw
 objcopy -I binary -O elf32-i386 -B i386 wp8.raw wp8.o
 convert "wallpapers/sunset.jpg" -resize 800x600! -depth 8 rgba:wp9.raw
 objcopy -I binary -O elf32-i386 -B i386 wp9.raw wp9.o
-
-# Icons
-for icon in edit folder calc off files calcu; do
-    convert ${icon}.png -depth 8 rgba:${icon}.raw
-    objcopy -I binary -O elf32-i386 -B i386 ${icon}.raw ${icon}.o
-done
 
 # Logos
 for logo in logo1 logo2; do
@@ -108,10 +111,7 @@ fi
 
 # 7. Aufräumen der temporären Dateien
 echo "7. Lösche temporäre Dateien..."
-rm -r isodir kernel.o shell.o mpra.o kernel.bin kernel-classic.o kernel-classic.bin
+rm -rf isodir kernel.o shell.o mpra.o kernel.bin kernel-classic.o kernel-classic.bin *.raw *.o
 
 echo "--- Build-Prozess abgeschlossen! ---"
 echo "Die bootfähige Datei 'myos.iso' wurde erfolgreich erstellt."
-echo "Du kannst diese Datei nun als virtuelles optisches Laufwerk in VirtualBox verwenden."
-
-./qemu.sh
