@@ -1,0 +1,24 @@
+name: Build latest
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Code auschecken
+        uses: actions/checkout@v4
+
+      - name: install needed
+        run: |
+          chmod +x ./install
+          ./install
+
+      - name: build os
+        run: |
+          chmod +x ./build.sh
+          ./build.sh
