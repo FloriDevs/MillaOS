@@ -15,8 +15,8 @@ jobs:
 
       - name: install needed
         run: |
-          chmod +x ./install
-          ./install
+          chmod +x ./install.sh
+          ./install.sh
 
       - name: build os
         run: |
