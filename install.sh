@@ -5,5 +5,5 @@ echo "installing build-essential using apt"
 sudo apt install build-essential
 echo "installing nasm using apt"
 sudo apt install nasm
-echo "installing imagemagick using apt"
-sudo apt install imagemagick
+echo "installing imagemagick mtools dosfstools using apt"
+sudo apt install imagemagick mtools dosfstools
