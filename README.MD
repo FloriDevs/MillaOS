@@ -23,7 +23,7 @@ You can build the OS on Linux (I use Debian) by running build.sh
 - Kernel Typ: Monolithic
 
 ## minimum system specs:
-- 45 mb RAM
+- 23 mb RAM (gets less not more :-) 
 - i386
 that's it greetings to you, Windows 11 ;-)
 
