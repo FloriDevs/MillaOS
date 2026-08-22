@@ -132,20 +132,14 @@ void save_settings();
 void load_settings();
 
 extern uint8_t _binary_wp1_raw_start[];
-extern uint8_t _binary_wp2_raw_start[];
-extern uint8_t _binary_wp3_raw_start[];
-extern uint8_t _binary_wp4_raw_start[];
-extern uint8_t _binary_wp5_raw_start[];
-extern uint8_t _binary_wp6_raw_start[];
-extern uint8_t _binary_wp7_raw_start[];
-extern uint8_t _binary_wp8_raw_start[];
-extern uint8_t _binary_wp9_raw_start[];
-extern uint8_t _binary_edit_raw_start[];
-extern uint8_t _binary_folder_raw_start[];
-extern uint8_t _binary_calc_raw_start[];
-extern uint8_t _binary_off_raw_start[];
 extern uint8_t _binary_logo1_raw_start[];
 extern uint8_t _binary_logo2_raw_start[];
+
+static uint32_t active_wallpaper[800 * 600];
+static int loaded_wallpaper_idx = -1;
+static bool wallpaper_file_load_failed = false;
+static bool last_fs_mounted = false;
+
 
 uint32_t *ui_buffer = nullptr;
 uint32_t *frontbuffer = nullptr;
@@ -331,25 +325,42 @@ void draw_image_scaled(int x, int y, int w, int h, uint8_t *data, int src_w,
 }
 
 void draw_wallpaper() {
-  uint32_t *wallpaper;
-  if (global_wallpaper == 0)
+  bool current_fs_mounted = shell_is_fs_mounted();
+  if (current_fs_mounted != last_fs_mounted) {
+    loaded_wallpaper_idx = -1;
+    last_fs_mounted = current_fs_mounted;
+  }
+
+  uint32_t *wallpaper = nullptr;
+
+  if (global_wallpaper == 0) {
     wallpaper = (uint32_t *)_binary_wp1_raw_start;
-  else if (global_wallpaper == 1)
-    wallpaper = (uint32_t *)_binary_wp2_raw_start;
-  else if (global_wallpaper == 2)
-    wallpaper = (uint32_t *)_binary_wp3_raw_start;
-  else if (global_wallpaper == 3)
-    wallpaper = (uint32_t *)_binary_wp4_raw_start;
-  else if (global_wallpaper == 4)
-    wallpaper = (uint32_t *)_binary_wp5_raw_start;
-  else if (global_wallpaper == 5)
-    wallpaper = (uint32_t *)_binary_wp6_raw_start;
-  else if (global_wallpaper == 6)
-    wallpaper = (uint32_t *)_binary_wp7_raw_start;
-  else if (global_wallpaper == 7)
-    wallpaper = (uint32_t *)_binary_wp8_raw_start;
-  else
-    wallpaper = (uint32_t *)_binary_wp9_raw_start;
+  } else {
+    if (loaded_wallpaper_idx != global_wallpaper) {
+      char filename[16];
+      string_copy(filename, "WP");
+      char num_str[4];
+      itoa_light(global_wallpaper + 1, num_str);
+      int len = string_length(filename);
+      string_copy(filename + len, num_str);
+      len = string_length(filename);
+      string_copy(filename + len, ".RAW");
+
+      if (shell_read_file(filename, (char *)active_wallpaper, sizeof(active_wallpaper))) {
+        loaded_wallpaper_idx = global_wallpaper;
+        wallpaper_file_load_failed = false;
+      } else {
+        loaded_wallpaper_idx = global_wallpaper;
+        wallpaper_file_load_failed = true;
+      }
+    }
+
+    if (!wallpaper_file_load_failed && loaded_wallpaper_idx == global_wallpaper) {
+      wallpaper = active_wallpaper;
+    } else {
+      wallpaper = (uint32_t *)_binary_wp1_raw_start;
+    }
+  }
 
   for (uint32_t y = 0; y < screen.height; y++) {
     for (uint32_t x = 0; x < screen.width; x++) {
@@ -763,7 +774,7 @@ void draw_settings_content(int x, int y, int w, int h, SettingsState &ss) {
     draw_string(x + 115, cy + 138, "Sea 2", 0xFFFFFF);
     draw_rect_alpha(x + 190, cy + 130, 80, 25,
                     global_wallpaper == 8 ? 0x005A9E : 0x333333, 255);
-    draw_string(x + 205, cy + 138, "Sunset", 0xFFFFFF);
+    draw_string(x + 205, cy + 138, "solarset", 0xFFFFFF);
 
     draw_string(x + 10, cy + 165, "Start Color", 0xDDDDDD);
     draw_rect_alpha(x + 10, cy + 185, 60, 25,
@@ -1589,18 +1600,19 @@ void draw_all_ui(WinState &welcome, WinState &fm, WinState &calc,
   if (welcome.open) {
     if (!welcome.minimized) {
       draw_window(welcome.x, welcome.y, welcome.w, welcome.h,
-                  "Welcome to Sun Eclips", true);
+                  "Welcome to solar Eclips", true);
       draw_string(welcome.x + 20, welcome.y + 50,
-                  "Welcome to Milla OS Sun Eclips", 0xFFFFFF);
-      draw_image_scaled(welcome.x + 20, welcome.y + 80, 100, 100,
-                        _binary_logo1_raw_start, 1024, 1024);
+                  "Welcome to Milla OS solar Eclips", 0xFFFFFF);
+      draw_image(welcome.x + 20, welcome.y + 80, 100, 100,
+                 _binary_logo1_raw_start);
       draw_string(welcome.x + 140, welcome.y + 80,
-                  "Milla OS Sun Eclips is a FOSS Operating System.", 0xDDDDDD);
+                  "Milla OS solar Eclips is a FOSS Operating System.",
+                  0xDDDDDD);
       draw_string(welcome.x + 140, welcome.y + 100,
                   "Written in C++ in Germany.", 0xDDDDDD);
       draw_rect_alpha(welcome.x + 20, welcome.y + 200, 500, 1, 0x444444, 255);
-      draw_image_scaled(welcome.x + 20, welcome.y + 220, 80, 80,
-                        _binary_logo2_raw_start, 460, 460);
+      draw_image(welcome.x + 20, welcome.y + 220, 80, 80,
+                 _binary_logo2_raw_start);
       draw_string(welcome.x + 120, welcome.y + 220,
                   "(c) 2025 - 2026 codeberg.orgFloriDevs", 0xAAAAAA);
     } else {

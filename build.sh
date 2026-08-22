@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Ins Verzeichnis des Skripts wechseln
+cd "$(dirname "$0")"
+
 # Dieses Skript automatisiert den Bauprozess, um einen Multiboot-kompatiblen Kernel
 # und eine bootfähige ISO-Datei mit GRUB zu erstellen.
 
@@ -22,6 +25,12 @@ then
     exit 1
 fi
 
+if ! command -v mformat &> /dev/null
+then
+    echo "mformat wurde nicht gefunden. Bitte installiere 'mtools' mit 'sudo apt install mtools'."
+    exit 1
+fi
+
 echo "--- Starte den Build-Prozess ---"
 
 # 1. Kernel kompilieren
@@ -32,47 +41,48 @@ g++ -m32 -ffreestanding -fno-pie -c shell.cpp -o shell.o
 g++ -m32 -ffreestanding -fno-pie -c mpra.cpp -o mpra.o
 g++ -m32 -ffreestanding -fno-pie -c mos-classic.cpp -o kernel-classic.o
 
-# Wallpaper und Icons vorbereiten
+# Wallpaper und Logos vorbereiten
 echo "1b. Bereite Medien-Assets vor..."
 convert "wallpapers/MillaOS-simple.png" -resize 800x600! -depth 8 rgba:wp1.raw
 objcopy -I binary -O elf32-i386 -B i386 wp1.raw wp1.o
 convert "wallpapers/MillaOS-field.png" -resize 800x600! -depth 8 rgba:wp2.raw
-objcopy -I binary -O elf32-i386 -B i386 wp2.raw wp2.o
 convert "wallpapers/FloriDevs.png" -resize 800x600! -depth 8 rgba:wp3.raw
-objcopy -I binary -O elf32-i386 -B i386 wp3.raw wp3.o
 convert "wallpapers/Way.jpg" -resize 800x600! -depth 8 rgba:wp4.raw
-objcopy -I binary -O elf32-i386 -B i386 wp4.raw wp4.o
 convert "wallpapers/Wonne.jpg" -resize 800x600! -depth 8 rgba:wp5.raw
-objcopy -I binary -O elf32-i386 -B i386 wp5.raw wp5.o
 convert "wallpapers/forest.jpg" -resize 800x600! -depth 8 rgba:wp6.raw
-objcopy -I binary -O elf32-i386 -B i386 wp6.raw wp6.o
 convert "wallpapers/frozen sea 2.jpg" -resize 800x600! -depth 8 rgba:wp7.raw
-objcopy -I binary -O elf32-i386 -B i386 wp7.raw wp7.o
 convert "wallpapers/frozen sea.jpg" -resize 800x600! -depth 8 rgba:wp8.raw
-objcopy -I binary -O elf32-i386 -B i386 wp8.raw wp8.o
 convert "wallpapers/sunset.jpg" -resize 800x600! -depth 8 rgba:wp9.raw
-objcopy -I binary -O elf32-i386 -B i386 wp9.raw wp9.o
 
-# Icons
-for icon in edit folder calc off files calcu; do
-    convert ${icon}.png -depth 8 rgba:${icon}.raw
-    objcopy -I binary -O elf32-i386 -B i386 ${icon}.raw ${icon}.o
-done
-
-# Logos
-for logo in logo1 logo2; do
-    convert ${logo}.png -depth 8 rgba:${logo}.raw
-    objcopy -I binary -O elf32-i386 -B i386 ${logo}.raw ${logo}.o
-done
+# Logos (resized to actual drawn dimensions: logo1: 100x100, logo2: 80x80)
+convert logo1.png -resize 100x100! -depth 8 rgba:logo1.raw
+objcopy -I binary -O elf32-i386 -B i386 logo1.raw logo1.o
+convert logo2.png -resize 80x80! -depth 8 rgba:logo2.raw
+objcopy -I binary -O elf32-i386 -B i386 logo2.raw logo2.o
 
 if [ $? -ne 0 ]; then
     echo "Fehler beim Vorbereiten der Assets."
     exit 1
 fi
 
-# 2. Kernel verknüpfen
+# Wallpapers auf das Festplatten- und USB-Image kopieren
+if [ -f "disk.img" ]; then
+    echo "Kopiere Wallpapers auf die HDD (disk.img)..."
+    for i in {1..9}; do
+        mcopy -o -i disk.img wp${i}.raw ::WP${i}.RAW
+    done
+fi
+
+if [ -f "usb.img" ]; then
+    echo "Kopiere Wallpapers auf das USB-Image (usb.img)..."
+    for i in {1..9}; do
+        mcopy -o -i usb.img wp${i}.raw ::WP${i}.RAW
+    done
+fi
+
+# 2. Kernel verknüpfen (nur wp1 und resized logos werden statisch gelinkt)
 echo "2. Verknüpfe den Kernel mit linker.ld..."
-ld -m elf_i386 -T linker.ld -o kernel.bin boot.o kernel.o shell.o mpra.o wp1.o wp2.o wp3.o wp4.o wp5.o wp6.o wp7.o wp8.o wp9.o logo1.o logo2.o
+ld -m elf_i386 -T linker.ld -o kernel.bin boot.o kernel.o shell.o mpra.o wp1.o logo1.o logo2.o
 if [ $? -ne 0 ]; then
     echo "Fehler beim Verknüpfen des Kernels."
     exit 1
@@ -108,10 +118,7 @@ fi
 
 # 7. Aufräumen der temporären Dateien
 echo "7. Lösche temporäre Dateien..."
-rm -r isodir kernel.o shell.o mpra.o kernel.bin kernel-classic.o kernel-classic.bin
+rm -rf isodir kernel.o shell.o mpra.o kernel.bin kernel-classic.o kernel-classic.bin *.raw *.o
 
 echo "--- Build-Prozess abgeschlossen! ---"
 echo "Die bootfähige Datei 'myos.iso' wurde erfolgreich erstellt."
-echo "Du kannst diese Datei nun als virtuelles optisches Laufwerk in VirtualBox verwenden."
-
-./qemu.sh
