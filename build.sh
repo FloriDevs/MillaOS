@@ -39,7 +39,6 @@ nasm -f elf32 boot.s -o boot.o
 g++ -m32 -ffreestanding -fno-pie -c kernel.cpp -o kernel.o
 g++ -m32 -ffreestanding -fno-pie -c shell.cpp -o shell.o
 g++ -m32 -ffreestanding -fno-pie -c mpra.cpp -o mpra.o
-g++ -m32 -ffreestanding -fno-pie -c mos-classic.cpp -o kernel-classic.o
 
 # Wallpaper und Logos vorbereiten
 echo "1b. Bereite Medien-Assets vor..."
@@ -88,12 +87,7 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-echo "2b. Verknüpfe den Classic-Kernel..."
-ld -m elf_i386 -T linker.ld -o kernel-classic.bin boot.o kernel-classic.o
-if [ $? -ne 0 ]; then
-    echo "Fehler beim Verknüpfen des Classic-Kernels."
-    exit 1
-fi
+
 
 # 3. Verzeichnisstruktur für das ISO-Image erstellen
 echo "3. Erstelle die ISO-Verzeichnisstruktur..."
@@ -102,7 +96,7 @@ mkdir -p isodir/boot/grub
 # 4. Kernel in das ISO-Verzeichnis kopieren
 echo "4. Kopiere den Kernel in das ISO-Verzeichnis..."
 cp kernel.bin isodir/boot/kernel.bin
-cp kernel-classic.bin isodir/boot/kernel-classic.bin
+
 
 # 5. GRUB-Konfigurationsdatei in das ISO-Verzeichnis kopieren
 echo "5. Kopiere die GRUB-Konfigurationsdatei..."
@@ -118,7 +112,7 @@ fi
 
 # 7. Aufräumen der temporären Dateien
 echo "7. Lösche temporäre Dateien..."
-rm -rf isodir kernel.o shell.o mpra.o kernel.bin kernel-classic.o kernel-classic.bin *.raw *.o
+rm -rf isodir kernel.o shell.o mpra.o kernel.bin *.raw *.o
 
 echo "--- Build-Prozess abgeschlossen! ---"
 echo "Die bootfähige Datei 'myos.iso' wurde erfolgreich erstellt."

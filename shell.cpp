@@ -140,7 +140,6 @@ static int loaded_wallpaper_idx = -1;
 static bool wallpaper_file_load_failed = false;
 static bool last_fs_mounted = false;
 
-
 uint32_t *ui_buffer = nullptr;
 uint32_t *frontbuffer = nullptr;
 
@@ -346,7 +345,8 @@ void draw_wallpaper() {
       len = string_length(filename);
       string_copy(filename + len, ".RAW");
 
-      if (shell_read_file(filename, (char *)active_wallpaper, sizeof(active_wallpaper))) {
+      if (shell_read_file(filename, (char *)active_wallpaper,
+                          sizeof(active_wallpaper))) {
         loaded_wallpaper_idx = global_wallpaper;
         wallpaper_file_load_failed = false;
       } else {
@@ -355,7 +355,8 @@ void draw_wallpaper() {
       }
     }
 
-    if (!wallpaper_file_load_failed && loaded_wallpaper_idx == global_wallpaper) {
+    if (!wallpaper_file_load_failed &&
+        loaded_wallpaper_idx == global_wallpaper) {
       wallpaper = active_wallpaper;
     } else {
       wallpaper = (uint32_t *)_binary_wp1_raw_start;
@@ -1023,14 +1024,30 @@ struct WordState {
 // tabels (SPREADSHEET) APP
 // ============================================================================
 
+const int SHEET_COLS = 40;
+const int SHEET_ROWS = 100;
+
 struct SheetState {
-  char cells[6][10][32]; // larger for formulas
+  char cells[SHEET_COLS][SHEET_ROWS][32]; // larger for formulas
   int sel_x, sel_y;
+  int scroll_x, scroll_y; // scroll offsets
   char filename[13];
   int filename_len;
   bool shift_pressed;
   bool show_open_dialog;
 };
+
+// Helper to convert column index to name (e.g., 0->A, 25->Z, 26->AA)
+void col_to_name(int col, char *out) {
+  int i = 0;
+  if (col >= 26) {
+    out[i++] = 'A' + (col / 26) - 1;
+    out[i++] = 'A' + (col % 26);
+  } else {
+    out[i++] = 'A' + col;
+  }
+  out[i] = '\0';
+}
 
 // Helper for formulas
 int get_cell_int(SheetState &ss, int col, int row, int depth);
@@ -1038,12 +1055,26 @@ int get_cell_int(SheetState &ss, int col, int row, int depth);
 int resolve_ref(SheetState &ss, const char *ref, int depth) {
   if (depth > 5)
     return 0;
-  if (ref[0] >= 'A' && ref[0] <= 'F' && ref[1] >= '1' && ref[1] <= '9') {
-    int c = ref[0] - 'A';
-    int r = (ref[1] - '1');
-    if (ref[2] == '0')
-      r = 9; // Handle row 10
-    return get_cell_int(ss, c, r, depth + 1);
+  if (ref[0] >= 'A' && ref[0] <= 'Z') {
+    int c = -1;
+    int r = -1;
+    int i = 0;
+    if (ref[1] >= 'A' && ref[1] <= 'Z') {
+      c = (ref[0] - 'A' + 1) * 26 + (ref[1] - 'A');
+      i = 2;
+    } else {
+      c = ref[0] - 'A';
+      i = 1;
+    }
+    if (c >= 0 && ref[i] >= '0' && ref[i] <= '9') {
+      r = 0;
+      while (ref[i] >= '0' && ref[i] <= '9') {
+        r = r * 10 + (ref[i] - '0');
+        i++;
+      }
+      r--; // 0-indexed row
+      return get_cell_int(ss, c, r, depth + 1);
+    }
   }
   // Is it just a number?
   bool num = true;
@@ -1066,7 +1097,7 @@ int resolve_ref(SheetState &ss, const char *ref, int depth) {
 }
 
 int get_cell_int(SheetState &ss, int col, int row, int depth) {
-  if (col < 0 || col >= 6 || row < 0 || row >= 10)
+  if (col < 0 || col >= SHEET_COLS || row < 0 || row >= SHEET_ROWS)
     return 0;
   const char *v = ss.cells[col][row];
   if (v[0] == '\0')
@@ -1074,34 +1105,71 @@ int get_cell_int(SheetState &ss, int col, int row, int depth) {
   if (v[0] == '=') {
     // Formula!
     if (string_starts_with(v + 1, "SUM(")) {
-      // SUM(A1:A5)
-      int sc = v[5] - 'A';
-      int sr = v[6] - '1';
-      int ec = v[8] - 'A';
-      int er = v[9] - '1';
-      if (v[7] == '0') {
-        sr = 9;
-        ec = v[9] - 'A';
-        er = v[10] - '1';
-      } // Offset check
-      // Simpler: assume format A1:A5 (5 chars) or A1:A10 (6 chars)
-      // Just parse row/col manually for robustness:
-      sc = v[5] - 'A';
-      sr = v[6] - '1';
-      if (v[7] == '0')
-        sr = 9;
-      int colon = 7;
-      if (sr == 9)
-        colon = 8;
-      ec = v[colon + 1] - 'A';
-      er = v[colon + 2] - '1';
-      if (v[colon + 3] == '0')
-        er = 9;
+      // Parse SUM(start_ref:end_ref)
+      char start_ref[8] = {0};
+      char end_ref[8] = {0};
+      int i = 5; // skip "=SUM("
+      int j = 0;
+      while (v[i] && v[i] != ':') {
+        if (j < 7)
+          start_ref[j++] = v[i];
+        i++;
+      }
+      if (v[i] == ':') {
+        i++; // skip ':'
+        j = 0;
+        while (v[i] && v[i] != ')') {
+          if (j < 7)
+            end_ref[j++] = v[i];
+          i++;
+        }
+      }
+      // Parse start_ref coordinates
+      int sc = -1, sr = -1;
+      int idx = 0;
+      if (start_ref[0] >= 'A' && start_ref[0] <= 'Z') {
+        if (start_ref[1] >= 'A' && start_ref[1] <= 'Z') {
+          sc = (start_ref[0] - 'A' + 1) * 26 + (start_ref[1] - 'A');
+          idx = 2;
+        } else {
+          sc = start_ref[0] - 'A';
+          idx = 1;
+        }
+        sr = 0;
+        while (start_ref[idx] >= '0' && start_ref[idx] <= '9') {
+          sr = sr * 10 + (start_ref[idx] - '0');
+          idx++;
+        }
+        sr--;
+      }
+
+      // Parse end_ref coordinates
+      int ec = -1, er = -1;
+      idx = 0;
+      if (end_ref[0] >= 'A' && end_ref[0] <= 'Z') {
+        if (end_ref[1] >= 'A' && end_ref[1] <= 'Z') {
+          ec = (end_ref[0] - 'A' + 1) * 26 + (end_ref[1] - 'A');
+          idx = 2;
+        } else {
+          ec = end_ref[0] - 'A';
+          idx = 1;
+        }
+        er = 0;
+        while (end_ref[idx] >= '0' && end_ref[idx] <= '9') {
+          er = er * 10 + (end_ref[idx] - '0');
+          idx++;
+        }
+        er--;
+      }
 
       int sum = 0;
-      for (int r = sr; r <= er; r++)
-        for (int c = sc; c <= ec; c++)
-          sum += get_cell_int(ss, c, r, depth + 1);
+      if (sc >= 0 && sr >= 0 && ec >= 0 && er >= 0) {
+        for (int r = sr; r <= er; r++) {
+          for (int c = sc; c <= ec; c++) {
+            sum += get_cell_int(ss, c, r, depth + 1);
+          }
+        }
+      }
       return sum;
     }
     // Basic A1+B2
@@ -1156,49 +1224,135 @@ void draw_sheet_content(int x, int y, int w, int h, SheetState &ss) {
   draw_string(x + 130, cy + 11, ss.filename, 0xDDDDDD);
 
   int grid_y = cy + 30;
-  int cell_w = (w - 20) / 6;
-  int cell_h = (h - 28 - 30) / 10;
+  int row_header_w = 30;
+  int col_header_h = 20;
+  int cell_w = 70;
+  int cell_h = 20;
+  int scrollbar_size = 12;
 
-  // Draw Column Headers (A-F)
-  for (int col = 0; col < 6; col++) {
-    char label[2] = {(char)('A' + col), '\0'};
-    draw_rect_alpha(x + col * cell_w, grid_y, cell_w, 20, 0x333333, 255);
-    draw_string(x + col * cell_w + (cell_w / 2) - 4, grid_y + 6, label,
+  int y_start = grid_y + col_header_h;
+  int scrollbar_y = y + h - scrollbar_size;
+  int scrollbar_x = x + w - scrollbar_size;
+  int grid_w = scrollbar_x - (x + row_header_w);
+  int grid_h = scrollbar_y - y_start;
+
+  int visible_cols = grid_w / cell_w;
+  int visible_rows = grid_h / cell_h;
+
+  // Clamp scroll offsets
+  int max_scroll_x = SHEET_COLS - visible_cols;
+  if (max_scroll_x < 0)
+    max_scroll_x = 0;
+  if (ss.scroll_x > max_scroll_x)
+    ss.scroll_x = max_scroll_x;
+  if (ss.scroll_x < 0)
+    ss.scroll_x = 0;
+
+  int max_scroll_y = SHEET_ROWS - visible_rows;
+  if (max_scroll_y < 0)
+    max_scroll_y = 0;
+  if (ss.scroll_y > max_scroll_y)
+    ss.scroll_y = max_scroll_y;
+  if (ss.scroll_y < 0)
+    ss.scroll_y = 0;
+
+  // Draw Top-Left Corner
+  draw_rect_alpha(x, grid_y, row_header_w, col_header_h, 0x333333, 255);
+
+  // Draw Column Headers
+  for (int c = 0; c < visible_cols; c++) {
+    int col_idx = ss.scroll_x + c;
+    if (col_idx >= SHEET_COLS)
+      break;
+    int cx = x + row_header_w + c * cell_w;
+    draw_rect_alpha(cx, grid_y, cell_w, col_header_h, 0x333333, 255);
+    char label[4];
+    col_to_name(col_idx, label);
+    draw_string(cx + (cell_w / 2) - string_length(label) * 4, grid_y + 6, label,
                 0xFFFFFF);
   }
 
-  // Draw grid
-  for (int row = 0; row < 10; row++) {
-    for (int col = 0; col < 6; col++) {
-      int cx = x + col * cell_w;
-      int cy_cell = grid_y + 20 + row * cell_h;
+  // Draw Row Headers and Grid
+  for (int r = 0; r < visible_rows; r++) {
+    int row_idx = ss.scroll_y + r;
+    if (row_idx >= SHEET_ROWS)
+      break;
+    int cy_cell = y_start + r * cell_h;
 
-      uint32_t bg = (ss.sel_x == col && ss.sel_y == row) ? 0x0E5A0E : 0x1E1E1E;
+    // Draw Row Header
+    draw_rect_alpha(x, cy_cell, row_header_w, cell_h, 0x333333, 255);
+    char row_lbl[8];
+    itoa_light(row_idx + 1, row_lbl);
+    draw_string(x + 4, cy_cell + (cell_h / 2) - 4, row_lbl, 0xFFFFFF);
+
+    // Draw cells in this row
+    for (int c = 0; c < visible_cols; c++) {
+      int col_idx = ss.scroll_x + c;
+      if (col_idx >= SHEET_COLS)
+        break;
+      int cx = x + row_header_w + c * cell_w;
+
+      bool is_selected = (ss.sel_x == col_idx && ss.sel_y == row_idx);
+      uint32_t bg = is_selected ? 0x0E5A0E : 0x1E1E1E;
       draw_rect_alpha(cx, cy_cell, cell_w, cell_h, bg, 255);
 
       // Border
       draw_rect_alpha(cx, cy_cell, cell_w, 1, 0x3A3A3C, 255);
       draw_rect_alpha(cx, cy_cell, 1, cell_h, 0x3A3A3C, 255);
 
-      if (ss.sel_x == col && ss.sel_y == row) {
+      if (is_selected) {
         // Show formula while editing
-        draw_string(cx + 4, cy_cell + (cell_h / 2) - 4, ss.cells[col][row],
-                    0xFFFFFF);
+        draw_string(cx + 4, cy_cell + (cell_h / 2) - 4,
+                    ss.cells[col_idx][row_idx], 0xFFFFFF);
       } else {
         // Show result
-        if (ss.cells[col][row][0] == '=') {
-          int val = get_cell_int(ss, col, row, 0);
+        if (ss.cells[col_idx][row_idx][0] == '=') {
+          int val = get_cell_int(ss, col_idx, row_idx, 0);
           char buf[16];
           itoa_light(val, buf);
           draw_string(cx + 4, cy_cell + (cell_h / 2) - 4, buf,
-                      0x4CAF50); // Bright green for formulas in dark mode
+                      0x4CAF50); // Bright green for formulas
         } else {
-          draw_string(cx + 4, cy_cell + (cell_h / 2) - 4, ss.cells[col][row],
-                      0xFFFFFF);
+          draw_string(cx + 4, cy_cell + (cell_h / 2) - 4,
+                      ss.cells[col_idx][row_idx], 0xFFFFFF);
         }
       }
     }
   }
+
+  // Draw vertical scrollbar
+  draw_rect_alpha(scrollbar_x, y_start, scrollbar_size, grid_h, 0x2D2D2D,
+                  255); // Track
+  if (visible_rows < SHEET_ROWS) {
+    int thumb_h = (visible_rows * grid_h) / SHEET_ROWS;
+    if (thumb_h < 15)
+      thumb_h = 15;
+    int thumb_y = y_start;
+    if (max_scroll_y > 0) {
+      thumb_y += (ss.scroll_y * (grid_h - thumb_h)) / max_scroll_y;
+    }
+    draw_rect_alpha(scrollbar_x + 2, thumb_y, scrollbar_size - 4, thumb_h,
+                    0x666666, 255); // Thumb
+  }
+
+  // Draw horizontal scrollbar
+  draw_rect_alpha(x + row_header_w, scrollbar_y, grid_w, scrollbar_size,
+                  0x2D2D2D, 255); // Track
+  if (visible_cols < SHEET_COLS) {
+    int thumb_w = (visible_cols * grid_w) / SHEET_COLS;
+    if (thumb_w < 15)
+      thumb_w = 15;
+    int thumb_x = x + row_header_w;
+    if (max_scroll_x > 0) {
+      thumb_x += (ss.scroll_x * (grid_w - thumb_w)) / max_scroll_x;
+    }
+    draw_rect_alpha(thumb_x, scrollbar_y + 2, thumb_w, scrollbar_size - 4,
+                    0x666666, 255); // Thumb
+  }
+
+  // Scroll corner
+  draw_rect_alpha(scrollbar_x, scrollbar_y, scrollbar_size, scrollbar_size,
+                  0x1E1E1E, 255);
 
   if (ss.show_open_dialog) {
     draw_rect_alpha(x + 20, y + 60, w - 40, h - 100, 0x252526, 255);
@@ -1220,6 +1374,22 @@ void draw_sheet_content(int x, int y, int w, int h, SheetState &ss) {
 
 bool handle_sheet_click(SheetState &ss, int x, int y, int w, int h) {
   int cy = y + 28;
+  int grid_y = cy + 30;
+
+  int row_header_w = 30;
+  int col_header_h = 20;
+  int cell_w = 70;
+  int cell_h = 20;
+  int scrollbar_size = 12;
+
+  int y_start = grid_y + col_header_h;
+  int scrollbar_y = y + h - scrollbar_size;
+  int scrollbar_x = x + w - scrollbar_size;
+  int grid_w = scrollbar_x - (x + row_header_w);
+  int grid_h = scrollbar_y - y_start;
+
+  int visible_cols = grid_w / cell_w;
+  int visible_rows = grid_h / cell_h;
 
   if (ss.show_open_dialog) {
     if (mouse_y >= y + 90 && mouse_y < y + 90 + 160) {
@@ -1241,6 +1411,8 @@ bool handle_sheet_click(SheetState &ss, int x, int y, int w, int h) {
         ss.filename_len = string_length(ss.filename);
         shell_read_file(ss.filename, (char *)ss.cells, sizeof(ss.cells));
         ss.show_open_dialog = false;
+        ss.scroll_x = 0;
+        ss.scroll_y = 0;
         return true;
       }
     }
@@ -1264,21 +1436,50 @@ bool handle_sheet_click(SheetState &ss, int x, int y, int w, int h) {
     }
   }
 
+  // Vertical scrollbar click
+  if (mouse_x >= scrollbar_x && mouse_x < x + w && mouse_y >= y_start &&
+      mouse_y < scrollbar_y) {
+    int click_y = mouse_y - y_start;
+    int max_scroll_y = SHEET_ROWS - visible_rows;
+    if (max_scroll_y > 0) {
+      ss.scroll_y = (click_y * max_scroll_y) / grid_h;
+      if (ss.scroll_y < 0)
+        ss.scroll_y = 0;
+      if (ss.scroll_y > max_scroll_y)
+        ss.scroll_y = max_scroll_y;
+    }
+    return true;
+  }
+
+  // Horizontal scrollbar click
+  if (mouse_y >= scrollbar_y && mouse_y < y + h &&
+      mouse_x >= x + row_header_w && mouse_x < scrollbar_x) {
+    int click_x = mouse_x - (x + row_header_w);
+    int max_scroll_x = SHEET_COLS - visible_cols;
+    if (max_scroll_x > 0) {
+      ss.scroll_x = (click_x * max_scroll_x) / grid_w;
+      if (ss.scroll_x < 0)
+        ss.scroll_x = 0;
+      if (ss.scroll_x > max_scroll_x)
+        ss.scroll_x = max_scroll_x;
+    }
+    return true;
+  }
+
   // Grid selection
-  int grid_y = cy + 30;
-  int cell_w = (w - 20) / 6;
-  int cell_h = (h - 28 - 30) / 10;
-  if (mouse_x >= x && mouse_x < x + cell_w * 6 && mouse_y >= grid_y + 20) {
-    ss.sel_x = (mouse_x - x) / cell_w;
-    ss.sel_y = (mouse_y - (grid_y + 20)) / cell_h;
+  int x_start = x + row_header_w;
+  if (mouse_x >= x_start && mouse_x < scrollbar_x && mouse_y >= y_start &&
+      mouse_y < scrollbar_y) {
+    ss.sel_x = ss.scroll_x + (mouse_x - x_start) / cell_w;
+    ss.sel_y = ss.scroll_y + (mouse_y - y_start) / cell_h;
     if (ss.sel_x < 0)
       ss.sel_x = 0;
-    if (ss.sel_x > 5)
-      ss.sel_x = 5;
+    if (ss.sel_x >= SHEET_COLS)
+      ss.sel_x = SHEET_COLS - 1;
     if (ss.sel_y < 0)
       ss.sel_y = 0;
-    if (ss.sel_y > 9)
-      ss.sel_y = 9;
+    if (ss.sel_y >= SHEET_ROWS)
+      ss.sel_y = SHEET_ROWS - 1;
     return true;
   }
 
@@ -1326,17 +1527,17 @@ void draw_word_content(int x, int y, int w, int h, WordState &ws) {
   // Draw text
   int tx = x + 15;
   int ty = cy + 45;
-  for (int i = 0; i <= ws.cursor_pos; i++) {
-    if (i == ws.cursor_pos && !ws.editing_filename) {
-      // Draw cursor (blinking)
-      Time t = get_time();
-      if (t.second % 2 == 0) {
-        draw_rect_alpha(tx, ty, 6, 12, 0xFFFFFF, 255);
-      }
-      break;
+  int len = string_length(ws.buffer);
+
+  // Track cursor position coordinates
+  int cursor_x = tx;
+  int cursor_y = ty;
+
+  for (int i = 0; i < len; i++) {
+    if (i == ws.cursor_pos) {
+      cursor_x = tx;
+      cursor_y = ty;
     }
-    if (i == ws.cursor_pos)
-      break;
 
     char c = ws.buffer[i];
     if (c == '\n') {
@@ -1351,9 +1552,23 @@ void draw_word_content(int x, int y, int w, int h, WordState &ws) {
       }
     }
   }
+
+  // If cursor is at the end of the text
+  if (ws.cursor_pos == len) {
+    cursor_x = tx;
+    cursor_y = ty;
+  }
+
+  // Draw the blinking cursor
+  if (!ws.editing_filename) {
+    Time t = get_time();
+    if (t.second % 2 == 0) {
+      draw_rect_alpha(cursor_x, cursor_y, 2, 12, 0xFFFFFF, 255);
+    }
+  }
 }
 
-void handle_word_click(WordState &ws, int x, int y) {
+void handle_word_click(WordState &ws, int x, int y, int w, int h) {
   int cy = y + 28;
 
   if (ws.show_open_dialog) {
@@ -1385,7 +1600,7 @@ void handle_word_click(WordState &ws, int x, int y) {
   // buttons
   if (mouse_y >= cy + 5 && mouse_y <= cy + 25) {
     if (mouse_x >= x + 10 && mouse_x <= x + 70) {
-      shell_write_file(ws.filename, ws.buffer, ws.cursor_pos);
+      shell_write_file(ws.filename, ws.buffer, string_length(ws.buffer));
     } else if (mouse_x >= x + 80 && mouse_x <= x + 140) {
       ws.show_open_dialog = true;
     } else if (mouse_x >= x + 190 && mouse_x <= x + 290) {
@@ -1394,6 +1609,43 @@ void handle_word_click(WordState &ws, int x, int y) {
     }
   }
   ws.editing_filename = false;
+
+  // Text area click to move cursor
+  if (mouse_x >= x + 10 && mouse_x < x + w - 10 && mouse_y >= cy + 40 &&
+      mouse_y < cy + 40 + h - 75) {
+    int target_cursor = -1;
+    int min_dist = 99999999;
+    int tx = x + 15;
+    int ty = cy + 45;
+    int len = string_length(ws.buffer);
+
+    for (int i = 0; i <= len; i++) {
+      int dy_diff = mouse_y - (ty + 7);
+      int dx_diff = mouse_x - (tx + 4);
+      int dist = dy_diff * dy_diff + dx_diff * dx_diff;
+      if (dist < min_dist) {
+        min_dist = dist;
+        target_cursor = i;
+      }
+      if (i == len)
+        break;
+
+      char c = ws.buffer[i];
+      if (c == '\n') {
+        tx = x + 15;
+        ty += 14;
+      } else {
+        tx += 8;
+        if (tx > x + w - 25) {
+          tx = x + 15;
+          ty += 14;
+        }
+      }
+    }
+    if (target_cursor != -1) {
+      ws.cursor_pos = target_cursor;
+    }
+  }
 }
 
 void handle_word_key(WordState &ws, uint8_t scancode) {
@@ -1416,17 +1668,39 @@ void handle_word_key(WordState &ws, uint8_t scancode) {
       }
     } else {
       if (scancode == 0x0E && ws.cursor_pos > 0) { // Backspace
+        int len = string_length(ws.buffer);
+        for (int i = ws.cursor_pos - 1; i < len; i++) {
+          ws.buffer[i] = ws.buffer[i + 1];
+        }
         ws.cursor_pos--;
-        ws.buffer[ws.cursor_pos] = '\0';
       } else if (scancode == 0x1C && ws.cursor_pos < 4095) { // Enter
-        ws.buffer[ws.cursor_pos++] = '\n';
-        ws.buffer[ws.cursor_pos] = '\0';
+        int len = string_length(ws.buffer);
+        if (len < 4095) {
+          for (int i = len; i >= ws.cursor_pos; i--) {
+            ws.buffer[i + 1] = ws.buffer[i];
+          }
+          ws.buffer[ws.cursor_pos++] = '\n';
+        }
+      } else if (scancode == 0x4B) { // Left arrow
+        if (ws.cursor_pos > 0) {
+          ws.cursor_pos--;
+        }
+      } else if (scancode == 0x4D) { // Right arrow
+        int len = string_length(ws.buffer);
+        if (ws.cursor_pos < len) {
+          ws.cursor_pos++;
+        }
       } else {
         char ch = shell_scancode_to_ascii(scancode, ws.shift_pressed);
         // Simple printable ascii
         if (ch >= 32 && ch <= 126 && ws.cursor_pos < 4095) {
-          ws.buffer[ws.cursor_pos++] = ch;
-          ws.buffer[ws.cursor_pos] = '\0';
+          int len = string_length(ws.buffer);
+          if (len < 4095) {
+            for (int i = len; i >= ws.cursor_pos; i--) {
+              ws.buffer[i + 1] = ws.buffer[i];
+            }
+            ws.buffer[ws.cursor_pos++] = ch;
+          }
         }
       }
     }
@@ -1600,13 +1874,13 @@ void draw_all_ui(WinState &welcome, WinState &fm, WinState &calc,
   if (welcome.open) {
     if (!welcome.minimized) {
       draw_window(welcome.x, welcome.y, welcome.w, welcome.h,
-                  "Welcome to solar Eclips", true);
+                  "Welcome to 2.1.3 Appril", true);
       draw_string(welcome.x + 20, welcome.y + 50,
-                  "Welcome to Milla OS solar Eclips", 0xFFFFFF);
+                  "Welcome to Milla OS 2.1.3 Appril", 0xFFFFFF);
       draw_image(welcome.x + 20, welcome.y + 80, 100, 100,
                  _binary_logo1_raw_start);
       draw_string(welcome.x + 140, welcome.y + 80,
-                  "Milla OS solar Eclips is a FOSS Operating System.",
+                  "Milla OS 2.1.3 Appril is a FOSS Operating System.",
                   0xDDDDDD);
       draw_string(welcome.x + 140, welcome.y + 100,
                   "Written in C++ in Germany.", 0xDDDDDD);
@@ -1829,13 +2103,15 @@ extern "C" void start_graphical_shell() {
 
   static bool sss_init = false;
   if (!sss_init) {
-    for (int r = 0; r < 10; r++) {
-      for (int c = 0; c < 6; c++) {
+    for (int r = 0; r < SHEET_ROWS; r++) {
+      for (int c = 0; c < SHEET_COLS; c++) {
         sss.cells[c][r][0] = '\0';
       }
     }
     sss.sel_x = 0;
     sss.sel_y = 0;
+    sss.scroll_x = 0;
+    sss.scroll_y = 0;
     string_copy(sss.filename, "BOOK.SHT");
     sss.filename_len = 8;
     sss.shift_pressed = false;
@@ -1897,19 +2173,19 @@ extern "C" void start_graphical_shell() {
             sss.cells[sss.sel_x][sss.sel_y][len - 1] = '\0';
           needs_redraw = true;
         } else if (scancode == 0x1C) { // Enter moves down
-          sss.sel_y = (sss.sel_y + 1) % 10;
+          sss.sel_y = (sss.sel_y + 1) % SHEET_ROWS;
           needs_redraw = true;
         } else if (scancode == 0x48) { // Up
-          sss.sel_y = (sss.sel_y + 9) % 10;
+          sss.sel_y = (sss.sel_y + SHEET_ROWS - 1) % SHEET_ROWS;
           needs_redraw = true;
         } else if (scancode == 0x50) { // Down
-          sss.sel_y = (sss.sel_y + 1) % 10;
+          sss.sel_y = (sss.sel_y + 1) % SHEET_ROWS;
           needs_redraw = true;
         } else if (scancode == 0x4B) { // Left
-          sss.sel_x = (sss.sel_x + 5) % 6;
+          sss.sel_x = (sss.sel_x + SHEET_COLS - 1) % SHEET_COLS;
           needs_redraw = true;
         } else if (scancode == 0x4D) { // Right
-          sss.sel_x = (sss.sel_x + 1) % 6;
+          sss.sel_x = (sss.sel_x + 1) % SHEET_COLS;
           needs_redraw = true;
         } else {
           char c = shell_scancode_to_ascii(scancode, sss.shift_pressed);
@@ -1921,6 +2197,32 @@ extern "C" void start_graphical_shell() {
               needs_redraw = true;
             }
           }
+        }
+
+        // Ensure selection is visible
+        int cy = tabels.y + 28;
+        int grid_y = cy + 30;
+        int row_header_w = 30;
+        int col_header_h = 20;
+        int cell_w = 70;
+        int cell_h = 20;
+        int scrollbar_size = 12;
+        int scrollbar_y = tabels.y + tabels.h - scrollbar_size;
+        int scrollbar_x = tabels.x + tabels.w - scrollbar_size;
+        int grid_w = scrollbar_x - (tabels.x + row_header_w);
+        int grid_h = scrollbar_y - (grid_y + col_header_h);
+        int visible_cols = grid_w / cell_w;
+        int visible_rows = grid_h / cell_h;
+
+        if (sss.sel_x < sss.scroll_x) {
+          sss.scroll_x = sss.sel_x;
+        } else if (sss.sel_x >= sss.scroll_x + visible_cols) {
+          sss.scroll_x = sss.sel_x - visible_cols + 1;
+        }
+        if (sss.sel_y < sss.scroll_y) {
+          sss.scroll_y = sss.sel_y;
+        } else if (sss.sel_y >= sss.scroll_y + visible_rows) {
+          sss.scroll_y = sss.sel_y - visible_rows + 1;
         }
       }
     }
@@ -2001,7 +2303,7 @@ extern "C" void start_graphical_shell() {
 
     // --- Word content clicks ---
     if (mouse_clicked && word.open && !word.minimized) {
-      handle_word_click(ws, word.x, word.y);
+      handle_word_click(ws, word.x, word.y, word.w, word.h);
       needs_redraw = true;
     }
 
