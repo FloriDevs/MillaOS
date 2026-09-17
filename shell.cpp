@@ -442,6 +442,24 @@ void draw_window(int x, int y, int w, int h, const char *title, bool active) {
   draw_rect_alpha(x, y, w, 28, active ? 0x005A9E : 0x333333, 255);
   draw_string(x + 10, y + 10, title, 0xFFFFFF);
   draw_string(x + w - 40, y + 10, "- x", 0xFFFFFF);
+
+  if (h > 28) {
+    // Outer border outline
+    draw_rect_alpha(x, y, w, 1, 0x444444, 255);
+    draw_rect_alpha(x, y, 1, h, 0x444444, 255);
+    draw_rect_alpha(x + w - 1, y, 1, h, 0x444444, 255);
+    draw_rect_alpha(x, y + h - 1, w, 1, 0x444444, 255);
+
+    // Resize grip handle in bottom-right corner
+    int rx = x + w - 12;
+    int ry = y + h - 12;
+    draw_rect_alpha(rx + 8, ry + 2, 2, 2, 0x888888, 255);
+    draw_rect_alpha(rx + 5, ry + 5, 2, 2, 0x888888, 255);
+    draw_rect_alpha(rx + 2, ry + 8, 2, 2, 0x888888, 255);
+    draw_rect_alpha(rx + 8, ry + 5, 2, 2, 0x888888, 255);
+    draw_rect_alpha(rx + 5, ry + 8, 2, 2, 0x888888, 255);
+    draw_rect_alpha(rx + 8, ry + 8, 2, 2, 0x888888, 255);
+  }
 }
 
 // ============================================================================
@@ -1711,22 +1729,33 @@ void handle_word_key(WordState &ws, uint8_t scancode) {
 // UI COMPOSITION
 // ============================================================================
 
+#define RESIZE_NONE 0
+#define RESIZE_RIGHT 1
+#define RESIZE_BOTTOM 2
+#define RESIZE_LEFT 4
+#define RESIZE_TOP 8
+
 struct WinState {
   int x, y, w, h;
   bool open;
   bool minimized;
   bool dragging;
   int drag_ox, drag_oy;
+  bool resizing;
+  int resize_mode;
+  int resize_start_x, resize_start_y;
+  int resize_start_w, resize_start_h;
+  int resize_start_win_x, resize_start_win_y;
 };
 
-static WinState welcome = {80, 60, 640, 340, true, false, false, 0, 0};
-static WinState fm = {120, 80, 500, 380, false, false, false, 0, 0};
-static WinState calc = {200, 100, 200, 280, false, false, false, 0, 0};
-static WinState word = {50, 50, 500, 400, false, false, false, 0, 0};
-static WinState tabels = {100, 100, 500, 300, false, false, false, 0, 0};
-static WinState settings = {300, 100, 300, 370, false, false, false, 0, 0};
-static WinState disk_manager = {350, 150, 300, 250, false, false, false, 0, 0};
-static WinState mpra_win = {150, 80, 400, 400, false, false, false, 0, 0};
+static WinState welcome = {80, 60, 640, 340, true, false, false, 0, 0, false, 0, 0, 0, 0, 0, 0, 0};
+static WinState fm = {120, 80, 500, 380, false, false, false, 0, 0, false, 0, 0, 0, 0, 0, 0, 0};
+static WinState calc = {200, 100, 200, 280, false, false, false, 0, 0, false, 0, 0, 0, 0, 0, 0, 0};
+static WinState word = {50, 50, 500, 400, false, false, false, 0, 0, false, 0, 0, 0, 0, 0, 0, 0};
+static WinState tabels = {100, 100, 500, 300, false, false, false, 0, 0, false, 0, 0, 0, 0, 0, 0, 0};
+static WinState settings = {300, 100, 300, 370, false, false, false, 0, 0, false, 0, 0, 0, 0, 0, 0, 0};
+static WinState disk_manager = {350, 150, 300, 250, false, false, false, 0, 0, false, 0, 0, 0, 0, 0, 0, 0};
+static WinState mpra_win = {150, 80, 400, 400, false, false, false, 0, 0, false, 0, 0, 0, 0, 0, 0, 0};
 
 static CalcState cs;
 static WordState ws;
@@ -2007,16 +2036,95 @@ void draw_menu_dropdown() {
   }
 }
 
-// Handle title-bar clicks (minimize, close, drag) for a window
+void update_window_resize(WinState &win, int mx, int my) {
+  if (!win.resizing)
+    return;
+
+  int min_w = 160;
+  int min_h = 100;
+  int scr_w = screen.width;
+  int scr_h = screen.height;
+
+  // Handle Right (East)
+  if (win.resize_mode & RESIZE_RIGHT) {
+    int dx = mx - win.resize_start_x;
+    int new_w = win.resize_start_w + dx;
+    if (new_w < min_w) new_w = min_w;
+    if (win.x + new_w > scr_w) new_w = scr_w - win.x;
+    win.w = new_w;
+  }
+
+  // Handle Bottom (South)
+  if (win.resize_mode & RESIZE_BOTTOM) {
+    int dy = my - win.resize_start_y;
+    int new_h = win.resize_start_h + dy;
+    if (new_h < min_h) new_h = min_h;
+    if (win.y + new_h > scr_h) new_h = scr_h - win.y;
+    win.h = new_h;
+  }
+
+  // Handle Left (West)
+  if (win.resize_mode & RESIZE_LEFT) {
+    int dx = mx - win.resize_start_x;
+    int new_w = win.resize_start_w - dx;
+    int new_x = win.resize_start_win_x + dx;
+    if (new_w < min_w) {
+      new_x = win.resize_start_win_x + (win.resize_start_w - min_w);
+      new_w = min_w;
+    }
+    if (new_x < 0) {
+      new_w += new_x;
+      new_x = 0;
+    }
+    win.x = new_x;
+    win.w = new_w;
+  }
+
+  // Handle Top (North)
+  if (win.resize_mode & RESIZE_TOP) {
+    int dy = my - win.resize_start_y;
+    int new_h = win.resize_start_h - dy;
+    int new_y = win.resize_start_win_y + dy;
+    if (new_h < min_h) {
+      new_y = win.resize_start_win_y + (win.resize_start_h - min_h);
+      new_h = min_h;
+    }
+    if (new_y < 0) {
+      new_h += new_y;
+      new_y = 0;
+    }
+    win.y = new_y;
+    win.h = new_h;
+  }
+}
+
+// Handle title-bar clicks (minimize, close, drag) and window resizing
 bool handle_window_titlebar(WinState &win, int mx, int my, bool clicked) {
   if (!win.open || !clicked)
     return false;
+
+  int margin = 8;
+
+  // Title-bar hit (top 28 pixels)
   if (my >= win.y && my <= win.y + 28 && mx >= win.x && mx <= win.x + win.w) {
     if (mx >= win.x + win.w - 28 && mx <= win.x + win.w - 8) {
       win.open = false;
       return true;
     } else if (mx >= win.x + win.w - 48 && mx <= win.x + win.w - 28) {
       win.minimized = !win.minimized;
+      return true;
+    } else if (!win.minimized && my <= win.y + margin) {
+      // Top resize border
+      win.resizing = true;
+      win.resize_mode = RESIZE_TOP;
+      if (mx <= win.x + margin) win.resize_mode |= RESIZE_LEFT;
+      if (mx >= win.x + win.w - margin) win.resize_mode |= RESIZE_RIGHT;
+      win.resize_start_x = mx;
+      win.resize_start_y = my;
+      win.resize_start_w = win.w;
+      win.resize_start_h = win.h;
+      win.resize_start_win_x = win.x;
+      win.resize_start_win_y = win.y;
       return true;
     } else {
       win.dragging = true;
@@ -2026,6 +2134,38 @@ bool handle_window_titlebar(WinState &win, int mx, int my, bool clicked) {
       return true;
     }
   }
+
+  // Check resize borders for non-minimized windows
+  if (!win.minimized) {
+    bool on_left = (mx >= win.x - margin && mx <= win.x + margin);
+    bool on_right = (mx >= win.x + win.w - margin && mx <= win.x + win.w + margin);
+    bool on_top = (my >= win.y - margin && my <= win.y + margin);
+    bool on_bottom = (my >= win.y + win.h - margin && my <= win.y + win.h + margin);
+
+    bool inside_x = (mx >= win.x - margin && mx <= win.x + win.w + margin);
+    bool inside_y = (my >= win.y - margin && my <= win.y + win.h + margin);
+
+    if (inside_x && inside_y && (on_left || on_right || on_top || on_bottom)) {
+      int mode = RESIZE_NONE;
+      if (on_left) mode |= RESIZE_LEFT;
+      if (on_right) mode |= RESIZE_RIGHT;
+      if (on_top) mode |= RESIZE_TOP;
+      if (on_bottom) mode |= RESIZE_BOTTOM;
+
+      if (mode != RESIZE_NONE) {
+        win.resizing = true;
+        win.resize_mode = mode;
+        win.resize_start_x = mx;
+        win.resize_start_y = my;
+        win.resize_start_w = win.w;
+        win.resize_start_h = win.h;
+        win.resize_start_win_x = win.x;
+        win.resize_start_win_y = win.y;
+        return true;
+      }
+    }
+  }
+
   return false;
 }
 
@@ -2147,6 +2287,10 @@ extern "C" void start_graphical_shell() {
     if (scancode == 0x3B) { // F1 - Global Super Key for Milla OS
       menu_open = !menu_open;
       needs_redraw = true;
+    }
+
+    if (scancode == 0x58) { // F12 - Switch to CLI
+      break;
     }
 
     if (scancode != 0 && word.open && !word.minimized) {
@@ -2420,10 +2564,13 @@ extern "C" void start_graphical_shell() {
       needs_redraw = true;
     }
 
-    // --- Release drag ---
+    // --- Release drag / resize ---
     if (mouse_released) {
       if (welcome.dragging || fm.dragging || calc.dragging || word.dragging ||
-          settings.dragging || disk_manager.dragging || mpra_win.dragging) {
+          tabels.dragging || settings.dragging || disk_manager.dragging ||
+          mpra_win.dragging || welcome.resizing || fm.resizing ||
+          calc.resizing || word.resizing || tabels.resizing ||
+          settings.resizing || disk_manager.resizing || mpra_win.resizing) {
         if (welcome.dragging)
           welcome.minimized = false;
         if (fm.dragging)
@@ -2442,17 +2589,17 @@ extern "C" void start_graphical_shell() {
           mpra_win.minimized = false;
         needs_redraw = true;
       }
-      welcome.dragging = false;
-      fm.dragging = false;
-      calc.dragging = false;
-      word.dragging = false;
-      tabels.dragging = false;
-      settings.dragging = false;
-      disk_manager.dragging = false;
-      mpra_win.dragging = false;
+      welcome.dragging = false; welcome.resizing = false;
+      fm.dragging = false; fm.resizing = false;
+      calc.dragging = false; calc.resizing = false;
+      word.dragging = false; word.resizing = false;
+      tabels.dragging = false; tabels.resizing = false;
+      settings.dragging = false; settings.resizing = false;
+      disk_manager.dragging = false; disk_manager.resizing = false;
+      mpra_win.dragging = false; mpra_win.resizing = false;
     }
 
-    // --- Dragging ---
+    // --- Dragging & Resizing ---
     if (mouse_x != last_mouse_x || mouse_y != last_mouse_y) {
       if (welcome.dragging) {
         welcome.x = mouse_x - welcome.drag_ox;
@@ -2494,6 +2641,15 @@ extern "C" void start_graphical_shell() {
         mpra_win.y = mouse_y - mpra_win.drag_oy;
         needs_redraw = true;
       }
+
+      if (welcome.resizing) { update_window_resize(welcome, mouse_x, mouse_y); needs_redraw = true; }
+      if (fm.resizing) { update_window_resize(fm, mouse_x, mouse_y); needs_redraw = true; }
+      if (calc.resizing) { update_window_resize(calc, mouse_x, mouse_y); needs_redraw = true; }
+      if (word.resizing) { update_window_resize(word, mouse_x, mouse_y); needs_redraw = true; }
+      if (tabels.resizing) { update_window_resize(tabels, mouse_x, mouse_y); needs_redraw = true; }
+      if (settings.resizing) { update_window_resize(settings, mouse_x, mouse_y); needs_redraw = true; }
+      if (disk_manager.resizing) { update_window_resize(disk_manager, mouse_x, mouse_y); needs_redraw = true; }
+      if (mpra_win.resizing) { update_window_resize(mpra_win, mouse_x, mouse_y); needs_redraw = true; }
     }
 
     // --- Redraw ---
