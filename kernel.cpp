@@ -206,7 +206,7 @@ extern "C" void outsl(uint16_t port, const void *addr, uint32_t count) {
 }
 
 // Verbesserte Delay-Funktion (wichtig!)
-void delay(uint32_t count) {
+extern "C" void delay(uint32_t count) {
   for (volatile uint32_t i = 0; i < count * 1000000; ++i) {
     asm volatile("nop");
   }
@@ -1421,6 +1421,7 @@ void milla_ide(const char *filename);
 void doc_editor(const char *filename);
 void text_editor(const char *filename);
 extern "C" void start_graphical_shell();
+extern "C" void start_cli();
 
 // ============================================================================
 // SHELL FILESYSTEM WRAPPERS (extern C for shell.cpp)
@@ -1545,6 +1546,86 @@ extern "C" int shell_get_active_disk() {
 }
 
 extern "C" bool shell_is_hdd_present() { return hdd_device.present; }
+
+bool delete_file(ATADevice *dev, const char *filename) {
+  if (!dev || !fs_mounted)
+    return false;
+
+  int file_idx = find_file(filename);
+  if (file_idx == -1)
+    return false;
+
+  uint32_t cluster = file_cache[file_idx].first_cluster;
+
+  // 1. Mark assigned FAT clusters as free (0x0000)
+  while (cluster >= 2 && cluster < 0xFFF8) {
+    uint32_t next_cluster = get_fat_entry(dev, cluster);
+    set_fat_entry(dev, cluster, 0x0000);
+    cluster = next_cluster;
+  }
+
+  // 2. Locate directory entry and mark deleted (0xE5)
+  uint32_t dir_lba = root_dir_lba;
+  bool deleted = false;
+  for (uint32_t sec = 0; sec < root_dir_sectors; sec++) {
+    if (!ata_read_sector(dev, dir_lba + sec, sector_buffer))
+      break;
+
+    DirEntry *entries = (DirEntry *)sector_buffer;
+    for (int i = 0; i < (SECTOR_SIZE / sizeof(DirEntry)); i++) {
+      if (entries[i].filename[0] == 0x00)
+        break;
+      if (entries[i].filename[0] == 0xE5)
+        continue;
+
+      char name_buf[13];
+      int npos = 0;
+      for (int j = 0; j < 8 && entries[i].filename[j] != ' '; j++) {
+        name_buf[npos++] = entries[i].filename[j];
+      }
+      if (entries[i].filename[8] != ' ') {
+        name_buf[npos++] = '.';
+        for (int j = 8; j < 11 && entries[i].filename[j] != ' '; j++) {
+          name_buf[npos++] = entries[i].filename[j];
+        }
+      }
+      name_buf[npos] = '\0';
+
+      bool match = string_compare(name_buf, filename);
+      if (!match) {
+        match = true;
+        int k = 0;
+        while (name_buf[k] != '\0' && filename[k] != '\0') {
+          char c1 = name_buf[k], c2 = filename[k];
+          if (c1 >= 'a' && c1 <= 'z') c1 -= 32;
+          if (c2 >= 'a' && c2 <= 'z') c2 -= 32;
+          if (c1 != c2) { match = false; break; }
+          k++;
+        }
+        if (match && (name_buf[k] != '\0' || filename[k] != '\0')) match = false;
+      }
+
+      if (match) {
+        entries[i].filename[0] = 0xE5;
+        ata_write_sector(dev, dir_lba + sec, sector_buffer);
+        deleted = true;
+        break;
+      }
+    }
+    if (deleted)
+      break;
+  }
+
+  read_directory(dev, root_dir_first_cluster);
+  return deleted;
+}
+
+extern "C" bool shell_delete_file(const char *filename) {
+  if (fs_mounted && active_disk) {
+    return delete_file(active_disk, filename);
+  }
+  return false;
+}
 
 // ============================================================================
 // SIMULIERTER C++ PROGRAMM-LADER
@@ -3691,9 +3772,6 @@ extern "C" void kernel_main(uint32_t magic, multiboot_info *info) {
     system_ram_mb = 128; // Fallback
 
   if (screen.active) {
-    // We will call the graphical shell here
-    // For now, let's just clear the screen to a modern dark grey
-    // Clear screen efficiently
     if (screen.framebuffer) {
       uint32_t total_pixels = screen.width * screen.height;
       for (uint32_t i = 0; i < total_pixels; i++) {
@@ -3701,15 +3779,13 @@ extern "C" void kernel_main(uint32_t magic, multiboot_info *info) {
       }
     }
     init_filesystem();
-    start_graphical_shell();
-
-    // Fallback if shell returns
-    // draw_flower();
-    // MTop();
+    while (1) {
+      start_graphical_shell();
+      start_cli();
+    }
   } else {
-    draw_flower();
     init_filesystem();
-    MTop();
+    start_cli();
   }
 }
 
