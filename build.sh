@@ -39,6 +39,7 @@ nasm -f elf32 boot.s -o boot.o
 g++ -m32 -ffreestanding -fno-pie -c kernel.cpp -o kernel.o
 g++ -m32 -ffreestanding -fno-pie -c shell.cpp -o shell.o
 g++ -m32 -ffreestanding -fno-pie -c mpra.cpp -o mpra.o
+g++ -m32 -ffreestanding -fno-pie -c cli.cpp -o cli.o
 
 # Wallpaper und Logos vorbereiten
 echo "1b. Bereite Medien-Assets vor..."
@@ -81,7 +82,7 @@ fi
 
 # 2. Kernel verknüpfen (nur wp1 und resized logos werden statisch gelinkt)
 echo "2. Verknüpfe den Kernel mit linker.ld..."
-ld -m elf_i386 -T linker.ld -o kernel.bin boot.o kernel.o shell.o mpra.o wp1.o logo1.o logo2.o
+ld -m elf_i386 -T linker.ld -o kernel.bin boot.o kernel.o shell.o mpra.o cli.o wp1.o logo1.o logo2.o
 if [ $? -ne 0 ]; then
     echo "Fehler beim Verknüpfen des Kernels."
     exit 1
@@ -112,7 +113,7 @@ fi
 
 # 7. Aufräumen der temporären Dateien
 echo "7. Lösche temporäre Dateien..."
-rm -rf isodir kernel.o shell.o mpra.o kernel.bin *.raw *.o
+rm -rf isodir kernel.o shell.o mpra.o cli.o kernel.bin *.raw *.o
 
 echo "--- Build-Prozess abgeschlossen! ---"
 echo "Die bootfähige Datei 'myos.iso' wurde erfolgreich erstellt."
