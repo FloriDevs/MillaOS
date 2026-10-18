@@ -14,6 +14,11 @@ bool shell_is_fs_mounted();
 bool shell_read_file(const char *filename, char *buffer, uint32_t max_size);
 bool shell_write_file(const char *filename, const char *data, uint32_t size);
 bool shell_delete_file(const char *filename);
+bool shell_mkdir(const char *name);
+bool shell_rmdir(const char *name);
+bool shell_move_file(const char *src, const char *dest);
+bool shell_change_dir(const char *path);
+const char *shell_get_current_path();
 void put_pixel(int x, int y, uint32_t color);
 void delay(uint32_t count);
 }
@@ -501,14 +506,20 @@ static void cmd_grep(int argc, char **argv) {
 
 static void cmd_rm(int argc, char **argv) {
   if (argc < 2) {
-    Oyster_println("Usage: rm <filename>");
+    Oyster_println("Usage: rm [-f] <filename> [filename2 ...]");
     return;
   }
-  if (shell_delete_file(argv[1])) {
-    Oyster_printf("rm: File '%s' deleted successfully.\n", argv[1]);
-  } else {
-    Oyster_printf("rm: cannot remove '%s': No such file or operation failed\n",
-               argv[1]);
+  for (int i = 1; i < argc; i++) {
+    if (Oyster_strcmp(argv[i], "-f") || Oyster_strcmp(argv[i], "-rf") ||
+        Oyster_strcmp(argv[i], "-r")) {
+      continue;
+    }
+    if (shell_delete_file(argv[i])) {
+      Oyster_printf("rm: File '%s' deleted successfully.\n", argv[i]);
+    } else {
+      Oyster_printf("rm: cannot remove '%s': No such file or operation failed\n",
+                    argv[i]);
+    }
   }
 }
 static void cmd_mname(int argc, char **argv) {
@@ -536,6 +547,77 @@ static void cmd_mname(int argc, char **argv) {
 
 }
 
+static void cmd_mkdir(int argc, char **argv) {
+  if (argc < 2) {
+    Oyster_println("Usage: mkdir <dirname>");
+    return;
+  }
+  if (!shell_is_fs_mounted()) {
+    Oyster_println("mkdir: No filesystem mounted.");
+    return;
+  }
+  if (shell_mkdir(argv[1])) {
+    Oyster_printf("mkdir: Directory '%s' created.\n", argv[1]);
+    shell_refresh_files();
+  } else {
+    Oyster_printf("mkdir: Failed to create '%s'.\n", argv[1]);
+  }
+}
+
+static void cmd_rmdir(int argc, char **argv) {
+  if (argc < 2) {
+    Oyster_println("Usage: rmdir <dirname>");
+    return;
+  }
+  if (!shell_is_fs_mounted()) {
+    Oyster_println("rmdir: No filesystem mounted.");
+    return;
+  }
+  if (shell_rmdir(argv[1])) {
+    Oyster_printf("rmdir: Directory '%s' removed.\n", argv[1]);
+    shell_refresh_files();
+  } else {
+    Oyster_printf("rmdir: Failed to remove '%s' (not empty or not found).\n", argv[1]);
+  }
+}
+
+static void cmd_mv(int argc, char **argv) {
+  if (argc < 3) {
+    Oyster_println("Usage: mv <source> <destination>");
+    return;
+  }
+  if (!shell_is_fs_mounted()) {
+    Oyster_println("mv: No filesystem mounted.");
+    return;
+  }
+  if (shell_move_file(argv[1], argv[2])) {
+    Oyster_printf("mv: '%s' -> '%s' OK.\n", argv[1], argv[2]);
+    shell_refresh_files();
+  } else {
+    Oyster_printf("mv: Failed to move '%s'.\n", argv[1]);
+  }
+}
+
+static void cmd_cd(int argc, char **argv) {
+  if (argc < 2) {
+    Oyster_println("Usage: cd <path>");
+    return;
+  }
+  if (!shell_is_fs_mounted()) {
+    Oyster_println("cd: No filesystem mounted.");
+    return;
+  }
+  if (shell_change_dir(argv[1])) {
+    shell_refresh_files();
+  } else {
+    Oyster_printf("cd: '%s': No such directory.\n", argv[1]);
+  }
+}
+
+static void cmd_pwd(int argc, char **argv) {
+  Oyster_println(shell_get_current_path());
+}
+
 static void Oyster_init_commands() { //set commands
   if (Oyster_command_count > 0)
     return; 
@@ -545,6 +627,11 @@ static void Oyster_init_commands() { //set commands
   Oyster_register_command("cat", "Display file contents", cmd_cat);
   Oyster_register_command("grep", "Search pattern in file line-by-line", cmd_grep);
   Oyster_register_command("rm", "Remove/delete specified file", cmd_rm);
+  Oyster_register_command("mkdir", "Create a new directory", cmd_mkdir);
+  Oyster_register_command("rmdir", "Remove an empty directory", cmd_rmdir);
+  Oyster_register_command("mv", "Move or rename a file/directory", cmd_mv);
+  Oyster_register_command("cd", "Change current directory", cmd_cd);
+  Oyster_register_command("pwd", "Print current directory path", cmd_pwd);
   Oyster_register_command("echo", "Print argument text to output", cmd_echo);
   Oyster_register_command("clear", "Clear terminal screen", cmd_clear);
   Oyster_register_command("exit", "Exit Oyster and return to Graphical Shell", cmd_exit);

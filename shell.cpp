@@ -27,6 +27,12 @@ char shell_scancode_to_ascii(uint8_t scancode, bool shift);
 void shell_set_language(int lang);
 bool shell_read_file(const char *filename, char *buffer, uint32_t max_size);
 bool shell_write_file(const char *filename, const char *data, uint32_t size);
+bool shell_delete_file(const char *filename);
+bool shell_mkdir(const char *name);
+bool shell_rmdir(const char *name);
+bool shell_move_file(const char *src, const char *dest);
+bool shell_change_dir(const char *path);
+const char *shell_get_current_path();
 bool shell_format_disk(int disk_id);
 bool shell_mount_disk(int disk_id);
 void shell_unmount_disk();
@@ -152,6 +158,9 @@ void my_put_pixel(int x, int y, uint32_t color) {
 
 // Alpha blending: (src * alpha + dest * (255 - alpha)) / 255
 uint32_t blend(uint32_t src, uint32_t dest, uint8_t alpha) {
+  if (get_total_ram_mb() <= 128) {
+    return src;
+  }
   uint32_t rb = (src & 0xFF00FF) * alpha + (dest & 0xFF00FF) * (256 - alpha);
   uint32_t g = (src & 0x00FF00) * alpha + (dest & 0x00FF00) * (256 - alpha);
   return ((rb >> 8) & 0xFF00FF) | ((g >> 8) & 0x00FF00);
@@ -159,17 +168,37 @@ uint32_t blend(uint32_t src, uint32_t dest, uint8_t alpha) {
 
 void draw_rect_alpha(int x, int y, int w, int h, uint32_t color,
                      uint8_t alpha) {
-  for (int i = y; i < y + h; i++) {
-    for (int j = x; j < x + w; j++) {
-      if (j < 0 || (uint32_t)j >= screen.width || i < 0 ||
-          (uint32_t)i >= screen.height)
+  if (get_total_ram_mb() <= 128) {
+    // Drop shadows (black with alpha < 128) are transparent shadows;
+    // without transparency they would appear as solid black boxes, so skip them.
+    if (color == 0x000000 && alpha < 128) {
+      return;
+    }
+    // No transparency: treat all other elements as fully opaque
+    alpha = 255;
+  }
+
+  if (alpha == 255) {
+    for (int i = y; i < y + h; i++) {
+      if (i < 0 || (uint32_t)i >= screen.height)
         continue;
-      if (alpha == 255) {
+      for (int j = x; j < x + w; j++) {
+        if (j < 0 || (uint32_t)j >= screen.width)
+          continue;
         my_put_pixel(j, i, color);
-      } else {
-        uint32_t dest = ui_buffer[i * screen.width + j];
-        my_put_pixel(j, i, blend(color, dest, alpha));
       }
+    }
+    return;
+  }
+
+  for (int i = y; i < y + h; i++) {
+    if (i < 0 || (uint32_t)i >= screen.height)
+      continue;
+    for (int j = x; j < x + w; j++) {
+      if (j < 0 || (uint32_t)j >= screen.width)
+        continue;
+      uint32_t dest = ui_buffer[i * screen.width + j];
+      my_put_pixel(j, i, blend(color, dest, alpha));
     }
   }
 }
@@ -285,6 +314,8 @@ void draw_string(int x, int y, const char *str, uint32_t color) {
 }
 
 void draw_image(int x, int y, int w, int h, uint8_t *data) {
+  if (get_total_ram_mb() <= 128)
+    return;
   uint32_t *pixels = (uint32_t *)data;
   for (int i = 0; i < h; i++) {
     for (int j = 0; j < w; j++) {
@@ -304,6 +335,8 @@ void draw_image(int x, int y, int w, int h, uint8_t *data) {
 
 void draw_image_scaled(int x, int y, int w, int h, uint8_t *data, int src_w,
                        int src_h) {
+  if (get_total_ram_mb() <= 128)
+    return;
   uint32_t *pixels = (uint32_t *)data;
   for (int i = 0; i < h; i++) {
     for (int j = 0; j < w; j++) {
@@ -324,6 +357,15 @@ void draw_image_scaled(int x, int y, int w, int h, uint8_t *data, int src_w,
 }
 
 void draw_wallpaper() {
+  if (get_total_ram_mb() <= 128) {
+    // Low memory mode: no wallpaper loaded or drawn
+    uint32_t total = screen.width * screen.height;
+    for (uint32_t i = 0; i < total; i++) {
+      ui_buffer[i] = 0x1A1A1A;
+    }
+    return;
+  }
+
   bool current_fs_mounted = shell_is_fs_mounted();
   if (current_fs_mounted != last_fs_mounted) {
     loaded_wallpaper_idx = -1;
@@ -505,76 +547,166 @@ void size_to_string(uint32_t size, char *out) {
   out[pos] = '\0';
 }
 
+// FM dialog state — defined here so draw_file_manager_content can access them
+// 0=none, 1=move/rename dialog, 2=new folder dialog
+static int  fm_dialog_type = 0;
+static char fm_input_buf[32] = {0};
+static int  fm_input_len = 0;
+static bool fm_shift = false;
+
 void draw_file_manager_content(int x, int y, int w, int h, int selected,
                                int scroll_offset) {
   // Background area below title bar
   int content_y = y + 28;
   int content_h = h - 28;
 
-  // Header bar
-  draw_rect_alpha(x, content_y, w, 20, 0x2D2D2D, 255);
-  draw_string(x + 10, content_y + 6, "Name", 0xDDDDDD);
-  draw_string(x + w / 2, content_y + 6, "Size", 0xDDDDDD);
-  draw_string(x + w - 80, content_y + 6, "Type", 0xDDDDDD);
+  // --- Path bar (height 18) ---
+  draw_rect_alpha(x, content_y, w, 18, 0x1A1A1A, 255);
+  const char *cur_path = shell_get_current_path();
+  // Build "Path: /FOO/" string
+  char path_str[64];
+  path_str[0] = 'P'; path_str[1] = 'a'; path_str[2] = 't';
+  path_str[3] = 'h'; path_str[4] = ':'; path_str[5] = ' ';
+  int ps = 6;
+  for (int i = 0; cur_path[i] && ps < 62; i++)
+    path_str[ps++] = cur_path[i];
+  path_str[ps] = '\0';
+  draw_string(x + 6, content_y + 5, path_str, 0x88CCFF);
 
-  // Separator line
-  draw_rect_alpha(x, content_y + 20, w, 1, 0x444444, 255);
+  // --- Toolbar area (height 30) ---
+  int toolbar_y = content_y + 18;
+  draw_rect_alpha(x, toolbar_y, w, 30, 0x252526, 255);
+
+  bool has_selection = (shell_is_fs_mounted() && get_shell_file_count() > 0 &&
+                        selected >= 0 && selected < get_shell_file_count());
+  // Check if selection is a real dir (not "..")
+  bool sel_is_navigable_dir = false;
+  if (has_selection) {
+    char _tn[16]; get_shell_file_name(selected, _tn);
+    sel_is_navigable_dir = get_shell_file_is_dir(selected) &&
+                           !(_tn[0]=='.' && _tn[1]=='.' && _tn[2]=='\0');
+  }
+
+  // [Delete] – red when selection exists
+  uint32_t del_bg = has_selection ? 0xC42B1C : 0x3A3A3C;
+  uint32_t del_fg = has_selection ? 0xFFFFFF : 0x888888;
+  draw_rect_alpha(x + 4, toolbar_y + 5, 54, 20, del_bg, 255);
+  draw_string(x + 11, toolbar_y + 11, "Delete", del_fg);
+
+  // [Move] – green when selection is a file (not a dir)
+  bool can_move = has_selection && !sel_is_navigable_dir;
+  uint32_t mov_bg = can_move ? 0x1F6F28 : 0x3A3A3C;
+  uint32_t mov_fg = can_move ? 0xFFFFFF : 0x888888;
+  draw_rect_alpha(x + 62, toolbar_y + 5, 44, 20, mov_bg, 255);
+  draw_string(x + 70, toolbar_y + 11, "Move", mov_fg);
+
+  // [New Folder]
+  draw_rect_alpha(x + 110, toolbar_y + 5, 76, 20, 0x005A9E, 255);
+  draw_string(x + 113, toolbar_y + 11, "New Folder", 0xFFFFFF);
+
+  // [Up] – navigate to parent directory
+  draw_rect_alpha(x + 190, toolbar_y + 5, 28, 20, 0x3A3A3C, 255);
+  draw_string(x + 196, toolbar_y + 11, "Up", 0xCCCCCC);
+
+  // [Refresh]
+  draw_rect_alpha(x + 222, toolbar_y + 5, 60, 20, 0x3A3A3C, 255);
+  draw_string(x + 228, toolbar_y + 11, "Refresh", 0xCCCCCC);
+
+  // Separator line below toolbar
+  draw_rect_alpha(x, toolbar_y + 29, w, 1, 0x3F3F46, 255);
+
+  // --- Header bar (height 20) ---
+  int header_y = toolbar_y + 30;
+  draw_rect_alpha(x, header_y, w, 20, 0x2D2D2D, 255);
+  draw_string(x + 10, header_y + 6, "Name", 0xDDDDDD);
+  draw_string(x + w / 2, header_y + 6, "Size", 0xDDDDDD);
+  draw_string(x + w - 80, header_y + 6, "Type", 0xDDDDDD);
+  draw_rect_alpha(x, header_y + 20, w, 1, 0x444444, 255);
 
   int row_height = 20;
-  int list_y = content_y + 22;
-  int max_visible = (content_h - 24) / row_height;
+  int list_y = header_y + 22;
+  // content_h includes path bar (18) + toolbar (30) + header (20) + sep (1) = 69 + separator pixels
+  int used = (toolbar_y - content_y) + 30 + 20 + 2; // path_bar_h + toolbar_h + header + seps
+  int max_visible = (content_h - used) / row_height;
+  if (max_visible < 0) max_visible = 0;
 
   if (!shell_is_fs_mounted()) {
     draw_string(x + 20, list_y + 20, "No filesystem mounted.", 0x888888);
-    return;
+    goto draw_dialog;
   }
 
-  int count = get_shell_file_count();
-  if (count == 0) {
-    draw_string(x + 20, list_y + 20, "No files found.", 0x888888);
-    return;
-  }
-
-  for (int i = 0; i < max_visible && (i + scroll_offset) < count; i++) {
-    int file_idx = i + scroll_offset;
-    bool is_selected = (file_idx == selected);
-
-    // Row background
-    uint32_t row_bg =
-        is_selected ? 0x005A9E : ((file_idx % 2 == 0) ? 0x252526 : 0x1E1E1E);
-    uint32_t text_color = is_selected ? 0xFFFFFF : 0xDDDDDD;
-    draw_rect_alpha(x + 1, list_y + i * row_height, w - 2, row_height, row_bg,
-                    is_selected ? 255 : 240);
-
-    // File name
-    char name[16];
-    get_shell_file_name(file_idx, name);
-    draw_string(x + 10, list_y + i * row_height + 6, name, text_color);
-
-    // File size
-    if (!get_shell_file_is_dir(file_idx)) {
-      char size_str[16];
-      size_to_string(get_shell_file_size(file_idx), size_str);
-      draw_string(x + w / 2, list_y + i * row_height + 6, size_str, text_color);
+  {
+    int count = get_shell_file_count();
+    if (count == 0) {
+      draw_string(x + 20, list_y + 20, "No files found.", 0x888888);
+      goto draw_dialog;
     }
 
-    // Type
-    draw_string(x + w - 80, list_y + i * row_height + 6,
-                get_shell_file_is_dir(file_idx) ? "DIR" : "FILE", text_color);
+    for (int i = 0; i < max_visible && (i + scroll_offset) < count; i++) {
+      int file_idx = i + scroll_offset;
+      bool is_selected = (file_idx == selected);
+      bool is_dir = get_shell_file_is_dir(file_idx);
+
+      uint32_t row_bg =
+          is_selected ? 0x005A9E : ((file_idx % 2 == 0) ? 0x252526 : 0x1E1E1E);
+      // Directories: yellow tint; files: normal; selected: always white
+      uint32_t text_color = is_selected ? 0xFFFFFF : (is_dir ? 0xFFE082 : 0xDDDDDD);
+      draw_rect_alpha(x + 1, list_y + i * row_height, w - 2, row_height, row_bg,
+                      is_selected ? 255 : 240);
+
+      char name[16];
+      get_shell_file_name(file_idx, name);
+      draw_string(x + 10, list_y + i * row_height + 6, name, text_color);
+
+      if (!is_dir) {
+        char size_str[16];
+        size_to_string(get_shell_file_size(file_idx), size_str);
+        draw_string(x + w / 2, list_y + i * row_height + 6, size_str, text_color);
+      }
+
+      draw_string(x + w - 80, list_y + i * row_height + 6,
+                  is_dir ? "DIR" : "FILE", text_color);
+    }
+
+    // Scroll indicator
+    if (count > max_visible && max_visible > 0) {
+      int bar_h = content_h - used;
+      int thumb_h = (max_visible * bar_h) / count;
+      if (thumb_h < 10) thumb_h = 10;
+      int thumb_y =
+          list_y + (scroll_offset * (bar_h - thumb_h)) / (count - max_visible);
+      draw_rect_alpha(x + w - 6, list_y, 4, bar_h, 0x333333, 200);
+      draw_rect_alpha(x + w - 6, thumb_y, 4, thumb_h, 0x666666, 255);
+    }
   }
 
-  // Scroll indicator
-  if (count > max_visible) {
-    int bar_h = content_h - 24;
-    int thumb_h = (max_visible * bar_h) / count;
-    if (thumb_h < 10)
-      thumb_h = 10;
-    int thumb_y =
-        list_y + (scroll_offset * (bar_h - thumb_h)) / (count - max_visible);
-    draw_rect_alpha(x + w - 6, list_y, 4, bar_h, 0x333333, 200);
-    draw_rect_alpha(x + w - 6, thumb_y, 4, thumb_h, 0x666666, 255);
+draw_dialog:
+  // --- Input dialog overlay for Move / New Folder ---
+  if (fm_dialog_type != 0) {
+    const char *dlg_title = (fm_dialog_type == 1) ? "Move / Rename to:" : "New Folder name:";
+    // Dialog box
+    int dx = x + w / 2 - 110;
+    int dy = y + h / 2 - 35;
+    draw_rect_alpha(dx, dy, 220, 70, 0x1E1E2E, 245);
+    draw_rect_alpha(dx, dy, 220, 1, 0x005A9E, 255);
+    draw_rect_alpha(dx, dy + 69, 220, 1, 0x005A9E, 255);
+    draw_rect_alpha(dx, dy, 1, 70, 0x005A9E, 255);
+    draw_rect_alpha(dx + 219, dy, 1, 70, 0x005A9E, 255);
+    draw_string(dx + 8, dy + 8, dlg_title, 0xCCCCCC);
+    // Input field
+    draw_rect_alpha(dx + 6, dy + 22, 208, 18, 0x111111, 255);
+    draw_string(dx + 10, dy + 26, fm_input_buf, 0xFFFFFF);
+    // Blinking cursor placeholder
+    int cur_x = dx + 10 + fm_input_len * 8;
+    draw_rect_alpha(cur_x, dy + 26, 2, 12, 0xFFFFFF, 200);
+    // Buttons
+    draw_rect_alpha(dx + 6,   dy + 46, 80, 18, 0x1F6F28, 255);
+    draw_string(dx + 22,  dy + 51, "OK", 0xFFFFFF);
+    draw_rect_alpha(dx + 94, dy + 46, 80, 18, 0x3A3A3C, 255);
+    draw_string(dx + 104, dy + 51, "Cancel", 0xCCCCCC);
   }
 }
+
 
 // ============================================================================
 // CALCULATOR WINDOW
@@ -764,36 +896,41 @@ void draw_settings_content(int x, int y, int w, int h, SettingsState &ss) {
                     global_mouse_speed == 3 ? 0x005A9E : 0x333333, 255);
     draw_string(x + 230, cy + 138, "Fast", 0xFFFFFF);
   } else {
-    draw_string(x + 10, cy + 50, "Wallpaper", 0xDDDDDD);
-    draw_rect_alpha(x + 10, cy + 70, 80, 25,
-                    global_wallpaper == 0 ? 0x005A9E : 0x333333, 255);
-    draw_string(x + 25, cy + 78, "Simple", 0xFFFFFF);
-    draw_rect_alpha(x + 100, cy + 70, 80, 25,
-                    global_wallpaper == 1 ? 0x005A9E : 0x333333, 255);
-    draw_string(x + 120, cy + 78, "Field", 0xFFFFFF);
-    draw_rect_alpha(x + 190, cy + 70, 80, 25,
-                    global_wallpaper == 2 ? 0x005A9E : 0x333333, 255);
-    draw_string(x + 215, cy + 78, "Devs", 0xFFFFFF);
+    if (get_total_ram_mb() > 128) {
+      draw_string(x + 10, cy + 50, "Wallpaper", 0xDDDDDD);
+      draw_rect_alpha(x + 10, cy + 70, 80, 25,
+                      global_wallpaper == 0 ? 0x005A9E : 0x333333, 255);
+      draw_string(x + 25, cy + 78, "Simple", 0xFFFFFF);
+      draw_rect_alpha(x + 100, cy + 70, 80, 25,
+                      global_wallpaper == 1 ? 0x005A9E : 0x333333, 255);
+      draw_string(x + 120, cy + 78, "Field", 0xFFFFFF);
+      draw_rect_alpha(x + 190, cy + 70, 80, 25,
+                      global_wallpaper == 2 ? 0x005A9E : 0x333333, 255);
+      draw_string(x + 215, cy + 78, "Devs", 0xFFFFFF);
 
-    draw_rect_alpha(x + 10, cy + 100, 80, 25,
-                    global_wallpaper == 3 ? 0x005A9E : 0x333333, 255);
-    draw_string(x + 30, cy + 108, "Way", 0xFFFFFF);
-    draw_rect_alpha(x + 100, cy + 100, 80, 25,
-                    global_wallpaper == 4 ? 0x005A9E : 0x333333, 255);
-    draw_string(x + 115, cy + 108, "Wonne", 0xFFFFFF);
-    draw_rect_alpha(x + 190, cy + 100, 80, 25,
-                    global_wallpaper == 5 ? 0x005A9E : 0x333333, 255);
-    draw_string(x + 205, cy + 108, "Forest", 0xFFFFFF);
+      draw_rect_alpha(x + 10, cy + 100, 80, 25,
+                      global_wallpaper == 3 ? 0x005A9E : 0x333333, 255);
+      draw_string(x + 30, cy + 108, "Way", 0xFFFFFF);
+      draw_rect_alpha(x + 100, cy + 100, 80, 25,
+                      global_wallpaper == 4 ? 0x005A9E : 0x333333, 255);
+      draw_string(x + 115, cy + 108, "Wonne", 0xFFFFFF);
+      draw_rect_alpha(x + 190, cy + 100, 80, 25,
+                      global_wallpaper == 5 ? 0x005A9E : 0x333333, 255);
+      draw_string(x + 205, cy + 108, "Forest", 0xFFFFFF);
 
-    draw_rect_alpha(x + 10, cy + 130, 80, 25,
-                    global_wallpaper == 6 ? 0x005A9E : 0x333333, 255);
-    draw_string(x + 25, cy + 138, "Sea 1", 0xFFFFFF);
-    draw_rect_alpha(x + 100, cy + 130, 80, 25,
-                    global_wallpaper == 7 ? 0x005A9E : 0x333333, 255);
-    draw_string(x + 115, cy + 138, "Sea 2", 0xFFFFFF);
-    draw_rect_alpha(x + 190, cy + 130, 80, 25,
-                    global_wallpaper == 8 ? 0x005A9E : 0x333333, 255);
-    draw_string(x + 205, cy + 138, "solarset", 0xFFFFFF);
+      draw_rect_alpha(x + 10, cy + 130, 80, 25,
+                      global_wallpaper == 6 ? 0x005A9E : 0x333333, 255);
+      draw_string(x + 25, cy + 138, "Sea 1", 0xFFFFFF);
+      draw_rect_alpha(x + 100, cy + 130, 80, 25,
+                      global_wallpaper == 7 ? 0x005A9E : 0x333333, 255);
+      draw_string(x + 115, cy + 138, "Sea 2", 0xFFFFFF);
+      draw_rect_alpha(x + 190, cy + 130, 80, 25,
+                      global_wallpaper == 8 ? 0x005A9E : 0x333333, 255);
+      draw_string(x + 205, cy + 138, "solarset", 0xFFFFFF);
+    } else {
+      draw_string(x + 10, cy + 50, "Wallpaper (Disabled: RAM <= 128MB)", 0x888888);
+      draw_string(x + 10, cy + 80, "Wallpapers and effects require > 128MB RAM", 0x666666);
+    }
 
     draw_string(x + 10, cy + 165, "Start Color", 0xDDDDDD);
     draw_rect_alpha(x + 10, cy + 185, 60, 25,
@@ -962,32 +1099,34 @@ void handle_settings_click(SettingsState &ss, int x, int y) {
     }
   } else {
     // Wallpaper clicks
-    if (mouse_y >= cy + 70 && mouse_y <= cy + 95) {
-      if (mouse_x >= x + 10 && mouse_x <= x + 90)
-        global_wallpaper = 0;
-      else if (mouse_x >= x + 100 && mouse_x <= x + 180)
-        global_wallpaper = 1;
-      else if (mouse_x >= x + 190 && mouse_x <= x + 270)
-        global_wallpaper = 2;
-      setting_changed = true;
-    }
-    if (mouse_y >= cy + 100 && mouse_y <= cy + 125) {
-      if (mouse_x >= x + 10 && mouse_x <= x + 90)
-        global_wallpaper = 3;
-      else if (mouse_x >= x + 100 && mouse_x <= x + 180)
-        global_wallpaper = 4;
-      else if (mouse_x >= x + 190 && mouse_x <= x + 270)
-        global_wallpaper = 5;
-      setting_changed = true;
-    }
-    if (mouse_y >= cy + 130 && mouse_y <= cy + 155) {
-      if (mouse_x >= x + 10 && mouse_x <= x + 90)
-        global_wallpaper = 6;
-      else if (mouse_x >= x + 100 && mouse_x <= x + 180)
-        global_wallpaper = 7;
-      else if (mouse_x >= x + 190 && mouse_x <= x + 270)
-        global_wallpaper = 8;
-      setting_changed = true;
+    if (get_total_ram_mb() > 128) {
+      if (mouse_y >= cy + 70 && mouse_y <= cy + 95) {
+        if (mouse_x >= x + 10 && mouse_x <= x + 90)
+          global_wallpaper = 0;
+        else if (mouse_x >= x + 100 && mouse_x <= x + 180)
+          global_wallpaper = 1;
+        else if (mouse_x >= x + 190 && mouse_x <= x + 270)
+          global_wallpaper = 2;
+        setting_changed = true;
+      }
+      if (mouse_y >= cy + 100 && mouse_y <= cy + 125) {
+        if (mouse_x >= x + 10 && mouse_x <= x + 90)
+          global_wallpaper = 3;
+        else if (mouse_x >= x + 100 && mouse_x <= x + 180)
+          global_wallpaper = 4;
+        else if (mouse_x >= x + 190 && mouse_x <= x + 270)
+          global_wallpaper = 5;
+        setting_changed = true;
+      }
+      if (mouse_y >= cy + 130 && mouse_y <= cy + 155) {
+        if (mouse_x >= x + 10 && mouse_x <= x + 90)
+          global_wallpaper = 6;
+        else if (mouse_x >= x + 100 && mouse_x <= x + 180)
+          global_wallpaper = 7;
+        else if (mouse_x >= x + 190 && mouse_x <= x + 270)
+          global_wallpaper = 8;
+        setting_changed = true;
+      }
     }
     // Start color clicks
     if (mouse_y >= cy + 185 && mouse_y <= cy + 210) {
@@ -1446,6 +1585,7 @@ bool handle_sheet_click(SheetState &ss, int x, int y, int w, int h) {
   if (mouse_y >= cy + 5 && mouse_y <= cy + 25) {
     if (mouse_x >= x + 10 && mouse_x <= x + 60) {
       shell_write_file(ss.filename, (char *)ss.cells, sizeof(ss.cells));
+      shell_refresh_files();
       return true;
     }
     if (mouse_x >= x + 70 && mouse_x <= x + 120) {
@@ -1619,6 +1759,7 @@ void handle_word_click(WordState &ws, int x, int y, int w, int h) {
   if (mouse_y >= cy + 5 && mouse_y <= cy + 25) {
     if (mouse_x >= x + 10 && mouse_x <= x + 70) {
       shell_write_file(ws.filename, ws.buffer, string_length(ws.buffer));
+      shell_refresh_files();
     } else if (mouse_x >= x + 80 && mouse_x <= x + 140) {
       ws.show_open_dialog = true;
     } else if (mouse_x >= x + 190 && mouse_x <= x + 290) {
@@ -1906,18 +2047,29 @@ void draw_all_ui(WinState &welcome, WinState &fm, WinState &calc,
                   "Welcome to 2.1.3 Appril", true);
       draw_string(welcome.x + 20, welcome.y + 50,
                   "Welcome to Milla OS 2.1.3 Appril", 0xFFFFFF);
-      draw_image(welcome.x + 20, welcome.y + 80, 100, 100,
-                 _binary_logo1_raw_start);
-      draw_string(welcome.x + 140, welcome.y + 80,
-                  "Milla OS 2.1.3 Appril is a FOSS Operating System.",
-                  0xDDDDDD);
-      draw_string(welcome.x + 140, welcome.y + 100,
-                  "Written in C++ in Germany.", 0xDDDDDD);
-      draw_rect_alpha(welcome.x + 20, welcome.y + 200, 500, 1, 0x444444, 255);
-      draw_image(welcome.x + 20, welcome.y + 220, 80, 80,
-                 _binary_logo2_raw_start);
-      draw_string(welcome.x + 120, welcome.y + 220,
-                  "(c) 2025 - 2026 codeberg.orgFloriDevs", 0xAAAAAA);
+      if (get_total_ram_mb() > 128) {
+        draw_image(welcome.x + 20, welcome.y + 80, 100, 100,
+                   _binary_logo1_raw_start);
+        draw_string(welcome.x + 140, welcome.y + 80,
+                    "Milla OS 2.1.3 Appril is a FOSS Operating System.",
+                    0xDDDDDD);
+        draw_string(welcome.x + 140, welcome.y + 100,
+                    "Written in C++ in Germany.", 0xDDDDDD);
+        draw_rect_alpha(welcome.x + 20, welcome.y + 200, 500, 1, 0x444444, 255);
+        draw_image(welcome.x + 20, welcome.y + 220, 80, 80,
+                   _binary_logo2_raw_start);
+        draw_string(welcome.x + 120, welcome.y + 220,
+                    "(c) 2025 - 2026 codeberg.orgFloriDevs", 0xAAAAAA);
+      } else {
+        draw_string(welcome.x + 20, welcome.y + 80,
+                    "Milla OS 2.1.3 Appril is a FOSS Operating System.",
+                    0xDDDDDD);
+        draw_string(welcome.x + 20, welcome.y + 100,
+                    "Written in C++ in Germany.", 0xDDDDDD);
+        draw_rect_alpha(welcome.x + 20, welcome.y + 130, 500, 1, 0x444444, 255);
+        draw_string(welcome.x + 20, welcome.y + 150,
+                    "(c) 2025 - 2026 codeberg.orgFloriDevs", 0xAAAAAA);
+      }
     } else {
       draw_window(welcome.x, welcome.y, welcome.w, 28, "Milla Welcome", true);
     }
@@ -2293,6 +2445,72 @@ extern "C" void start_graphical_shell() {
       break;
     }
 
+    // Shift tracking for FM dialog
+    if (scancode == 0x2A || scancode == 0x36)
+      fm_shift = true;
+    else if (scancode == (0x2A | 0x80) || scancode == (0x36 | 0x80))
+      fm_shift = false;
+
+    // Keyboard for FM input dialog
+    if (fm_dialog_type != 0 && fm.open && !fm.minimized && scancode != 0 && !(scancode & 0x80)) {
+      if (scancode == 0x01) { // Escape -> cancel
+        fm_dialog_type = 0;
+        fm_input_len = 0;
+        fm_input_buf[0] = '\0';
+        needs_redraw = true;
+      } else if (scancode == 0x1C) { // Enter -> commit
+        if (fm_input_len > 0) {
+          fm_input_buf[fm_input_len] = '\0';
+          if (fm_dialog_type == 1) {
+            char src[16];
+            get_shell_file_name(fm_selected, src);
+            shell_move_file(src, fm_input_buf);
+          } else {
+            shell_mkdir(fm_input_buf);
+          }
+          shell_refresh_files();
+          int new_count = get_shell_file_count();
+          if (fm_selected >= new_count)
+            fm_selected = new_count > 0 ? new_count - 1 : 0;
+        }
+        fm_dialog_type = 0;
+        fm_input_len = 0;
+        fm_input_buf[0] = '\0';
+        needs_redraw = true;
+      } else if (scancode == 0x0E) { // Backspace
+        if (fm_input_len > 0) {
+          fm_input_buf[--fm_input_len] = '\0';
+          needs_redraw = true;
+        }
+      } else {
+        char c = shell_scancode_to_ascii(scancode, fm_shift);
+        if (c >= 32 && c <= 126 && fm_input_len < 30) {
+          fm_input_buf[fm_input_len++] = c;
+          fm_input_buf[fm_input_len] = '\0';
+          needs_redraw = true;
+        }
+      }
+    }
+    // Delete key (0x53) for File Manager (only when no dialog is open)
+    else if (scancode == 0x53 && fm.open && !fm.minimized && fm_dialog_type == 0 &&
+        (!word.open || word.minimized || (!ws.editing_filename && !ws.show_open_dialog)) &&
+        (!tabels.open || tabels.minimized || !sss.show_open_dialog)) {
+      int count = get_shell_file_count();
+      if (shell_is_fs_mounted() && count > 0 &&
+          fm_selected >= 0 && fm_selected < count) {
+        char name[16];
+        get_shell_file_name(fm_selected, name);
+        shell_delete_file(name);
+        shell_refresh_files();
+        int new_count = get_shell_file_count();
+        if (fm_selected >= new_count) {
+          fm_selected = new_count > 0 ? new_count - 1 : 0;
+        }
+        needs_redraw = true;
+      }
+    }
+
+
     if (scancode != 0 && word.open && !word.minimized) {
       handle_word_key(ws, scancode);
       needs_redraw = true;
@@ -2484,58 +2702,175 @@ extern "C" void start_graphical_shell() {
 
     // --- File Manager content clicks ---
     if (mouse_clicked && fm.open && !fm.minimized) {
-      int content_y = fm.y + 28 + 22;
-      int row_height = 20;
-      int max_visible = (fm.h - 28 - 24) / row_height;
-      if (mouse_x >= fm.x && mouse_x <= fm.x + fm.w && mouse_y >= content_y &&
-          mouse_y < content_y + max_visible * row_height) {
-        int clicked_row = (mouse_y - content_y) / row_height;
-        int new_sel = clicked_row + fm_scroll;
-        if (new_sel >= 0 && new_sel < get_shell_file_count()) {
-          if (fm_selected == new_sel && !get_shell_file_is_dir(new_sel)) {
+      int cy = fm.y + 28;
+      int toolbar_y = cy + 18; // path bar is 18px tall
+
+      // If a dialog is open, handle OK/Cancel buttons and nothing else
+      if (fm_dialog_type != 0) {
+        int dx = fm.x + fm.w / 2 - 110;
+        int dy = fm.y + fm.h / 2 - 35;
+        // OK button: dx+6, dy+46, 80x18
+        if (mouse_x >= dx + 6 && mouse_x < dx + 86 &&
+            mouse_y >= dy + 46 && mouse_y < dy + 64) {
+          if (fm_input_len > 0) {
+            fm_input_buf[fm_input_len] = '\0';
+            if (fm_dialog_type == 1) {
+              // Move/Rename selected file
+              char src[16];
+              get_shell_file_name(fm_selected, src);
+              shell_move_file(src, fm_input_buf);
+            } else {
+              // New Folder
+              shell_mkdir(fm_input_buf);
+            }
+            shell_refresh_files();
+            int new_count = get_shell_file_count();
+            if (fm_selected >= new_count)
+              fm_selected = new_count > 0 ? new_count - 1 : 0;
+          }
+          fm_dialog_type = 0;
+          fm_input_len = 0;
+          fm_input_buf[0] = '\0';
+          needs_redraw = true;
+        }
+        // Cancel button: dx+94, dy+46, 80x18
+        else if (mouse_x >= dx + 94 && mouse_x < dx + 174 &&
+                 mouse_y >= dy + 46 && mouse_y < dy + 64) {
+          fm_dialog_type = 0;
+          fm_input_len = 0;
+          fm_input_buf[0] = '\0';
+          needs_redraw = true;
+        }
+        // Swallow all other clicks while dialog is open
+        goto fm_click_done;
+      }
+
+      // 1. Toolbar clicks (toolbar_y+5 to toolbar_y+25)
+      if (mouse_y >= toolbar_y + 5 && mouse_y <= toolbar_y + 25) {
+        // [Delete] x+4 .. x+58
+        if (mouse_x >= fm.x + 4 && mouse_x <= fm.x + 58) {
+          int count = get_shell_file_count();
+          if (shell_is_fs_mounted() && count > 0 &&
+              fm_selected >= 0 && fm_selected < count) {
+            char name[16];
+            get_shell_file_name(fm_selected, name);
+            shell_delete_file(name);
+            shell_refresh_files();
+            int new_count = get_shell_file_count();
+            if (fm_selected >= new_count)
+              fm_selected = new_count > 0 ? new_count - 1 : 0;
+            needs_redraw = true;
+          }
+        }
+        // [Move] x+62 .. x+106
+        else if (mouse_x >= fm.x + 62 && mouse_x <= fm.x + 106) {
+          int count = get_shell_file_count();
+          if (shell_is_fs_mounted() && count > 0 &&
+              fm_selected >= 0 && fm_selected < count &&
+              !get_shell_file_is_dir(fm_selected)) {
+            // Pre-fill with selected file name
+            char src[16];
+            get_shell_file_name(fm_selected, src);
+            fm_input_len = 0;
+            for (int _i = 0; src[_i] && fm_input_len < 30; _i++)
+              fm_input_buf[fm_input_len++] = src[_i];
+            fm_input_buf[fm_input_len] = '\0';
+            fm_dialog_type = 1;
+            needs_redraw = true;
+          }
+        }
+        // [New Folder] x+110 .. x+186
+        else if (mouse_x >= fm.x + 110 && mouse_x <= fm.x + 186) {
+          fm_input_len = 0;
+          fm_input_buf[0] = '\0';
+          fm_dialog_type = 2;
+          needs_redraw = true;
+        }
+        // [Up] x+190 .. x+218
+        else if (mouse_x >= fm.x + 190 && mouse_x <= fm.x + 218) {
+          shell_change_dir("..");
+          shell_refresh_files();
+          fm_selected = 0;
+          fm_scroll = 0;
+          needs_redraw = true;
+        }
+        // [Refresh] x+222 .. x+282
+        else if (mouse_x >= fm.x + 222 && mouse_x <= fm.x + 282) {
+          if (shell_is_fs_mounted()) {
+            shell_refresh_files();
+            int new_count = get_shell_file_count();
+            if (fm_selected >= new_count)
+              fm_selected = new_count > 0 ? new_count - 1 : 0;
+            needs_redraw = true;
+          }
+        }
+      }
+
+      // 2. File list clicks
+      {
+        int list_y = toolbar_y + 52; // toolbar(30) + header(20) + sep(2)
+        int row_height = 20;
+        int used = 18 + 30 + 20 + 2;
+        int max_visible = (fm.h - 28 - used) / row_height;
+        if (max_visible > 0 && mouse_x >= fm.x && mouse_x <= fm.x + fm.w &&
+            mouse_y >= list_y && mouse_y < list_y + max_visible * row_height) {
+          int clicked_row = (mouse_y - list_y) / row_height;
+          int new_sel = clicked_row + fm_scroll;
+          if (new_sel >= 0 && new_sel < get_shell_file_count()) {
+            bool is_dir = get_shell_file_is_dir(new_sel);
             char name[16];
             get_shell_file_name(new_sel, name);
 
-            // Check if name ends with .mru or .MRU
-            int name_len = string_length(name);
-            bool is_mpra = false;
-            if (name_len > 4) {
-              if (name[name_len - 4] == '.' &&
-                  (name[name_len - 3] == 'm' || name[name_len - 3] == 'M') &&
-                  (name[name_len - 2] == 'r' || name[name_len - 2] == 'R') &&
-                  (name[name_len - 1] == 'u' || name[name_len - 1] == 'U')) {
-                is_mpra = true;
-              }
-            }
-
-            if (is_mpra) {
-              mpra_run_file(name);
-              if (mpra_is_running()) {
-                mpra_win.w = mpra_get_window_w();
-                mpra_win.h = mpra_get_window_h();
-                mpra_win.open = true;
-                mpra_win.minimized = false;
-              }
-            } else {
-              // Double clicked: Open in Documents
-              string_copy(ws.filename, name);
-              ws.filename_len = string_length(name);
-              if (shell_read_file(ws.filename, ws.buffer, 4096)) {
-                ws.cursor_pos = 0;
-                while (ws.buffer[ws.cursor_pos] != '\0' && ws.cursor_pos < 4096)
-                  ws.cursor_pos++;
+            if (fm_selected == new_sel) {
+              // Double-click action
+              if (is_dir) {
+                // Navigate into directory (including "..")
+                shell_change_dir(name);
+                shell_refresh_files();
+                fm_selected = 0;
+                fm_scroll = 0;
               } else {
-                ws.buffer[0] = '\0';
-                ws.cursor_pos = 0;
+                // Check if .mru file
+                int name_len = string_length(name);
+                bool is_mpra = false;
+                if (name_len > 4) {
+                  if (name[name_len - 4] == '.' &&
+                      (name[name_len - 3] == 'm' || name[name_len - 3] == 'M') &&
+                      (name[name_len - 2] == 'r' || name[name_len - 2] == 'R') &&
+                      (name[name_len - 1] == 'u' || name[name_len - 1] == 'U')) {
+                    is_mpra = true;
+                  }
+                }
+                if (is_mpra) {
+                  mpra_run_file(name);
+                  if (mpra_is_running()) {
+                    mpra_win.w = mpra_get_window_w();
+                    mpra_win.h = mpra_get_window_h();
+                    mpra_win.open = true;
+                    mpra_win.minimized = false;
+                  }
+                } else {
+                  string_copy(ws.filename, name);
+                  ws.filename_len = string_length(name);
+                  if (shell_read_file(ws.filename, ws.buffer, 4096)) {
+                    ws.cursor_pos = 0;
+                    while (ws.buffer[ws.cursor_pos] != '\0' && ws.cursor_pos < 4096)
+                      ws.cursor_pos++;
+                  } else {
+                    ws.buffer[0] = '\0';
+                    ws.cursor_pos = 0;
+                  }
+                  word.open = true;
+                  word.minimized = false;
+                }
               }
-              word.open = true;
-              word.minimized = false;
             }
+            fm_selected = new_sel;
+            needs_redraw = true;
           }
-          fm_selected = new_sel;
-          needs_redraw = true;
         }
       }
+      fm_click_done:;
     }
 
     // --- Title bar interactions ---
