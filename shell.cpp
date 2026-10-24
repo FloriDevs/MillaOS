@@ -158,7 +158,7 @@ void my_put_pixel(int x, int y, uint32_t color) {
 
 // Alpha blending: (src * alpha + dest * (255 - alpha)) / 255
 uint32_t blend(uint32_t src, uint32_t dest, uint8_t alpha) {
-  if (get_total_ram_mb() <= 127) {
+  if (get_total_ram_mb() <= 120) {
     return src;
   }
   uint32_t rb = (src & 0xFF00FF) * alpha + (dest & 0xFF00FF) * (256 - alpha);
@@ -168,10 +168,10 @@ uint32_t blend(uint32_t src, uint32_t dest, uint8_t alpha) {
 
 void draw_rect_alpha(int x, int y, int w, int h, uint32_t color,
                      uint8_t alpha) {
-  if (get_total_ram_mb() <= 128) {
-    // Drop shadows (black with alpha < 128) are transparent shadows;
+  if (get_total_ram_mb() <= 120) {
+    // Drop shadows (black with alpha < 120) are transparent shadows;
     // without transparency they would appear as solid black boxes, so skip them.
-    if (color == 0x000000 && alpha < 128) {
+    if (color == 0x000000 && alpha < 120) {
       return;
     }
     // No transparency: treat all other elements as fully opaque
@@ -204,7 +204,7 @@ void draw_rect_alpha(int x, int y, int w, int h, uint32_t color,
 }
 
 // Simple 8x8 font
-uint8_t font8x8_basic[128][8] = {0};
+uint8_t font8x8_basic[120][8] = {0};
 
 void init_minimal_font() {
   // Very basic 8x8 bitmap font data for the used strings
@@ -314,7 +314,7 @@ void draw_string(int x, int y, const char *str, uint32_t color) {
 }
 
 void draw_image(int x, int y, int w, int h, uint8_t *data) {
-  if (get_total_ram_mb() <= 128)
+  if (get_total_ram_mb() <= 120)
     return;
   uint32_t *pixels = (uint32_t *)data;
   for (int i = 0; i < h; i++) {
@@ -327,7 +327,7 @@ void draw_image(int x, int y, int w, int h, uint8_t *data) {
       uint8_t g = (col >> 8) & 0xFF;
       uint8_t b = (col >> 16) & 0xFF;
       uint8_t a = (col >> 24) & 0xFF;
-      if (a > 128)
+      if (a > 120)
         my_put_pixel(x + j, y + i, (r << 16) | (g << 8) | b);
     }
   }
@@ -335,7 +335,7 @@ void draw_image(int x, int y, int w, int h, uint8_t *data) {
 
 void draw_image_scaled(int x, int y, int w, int h, uint8_t *data, int src_w,
                        int src_h) {
-  if (get_total_ram_mb() <= 128)
+  if (get_total_ram_mb() <= 120)
     return;
   uint32_t *pixels = (uint32_t *)data;
   for (int i = 0; i < h; i++) {
@@ -350,14 +350,14 @@ void draw_image_scaled(int x, int y, int w, int h, uint8_t *data, int src_w,
       uint8_t g = (col >> 8) & 0xFF;
       uint8_t b = (col >> 16) & 0xFF;
       uint8_t a = (col >> 24) & 0xFF;
-      if (a > 128)
+      if (a > 120)
         my_put_pixel(x + j, y + i, (r << 16) | (g << 8) | b);
     }
   }
 }
 
 void draw_wallpaper() {
-  if (get_total_ram_mb() <= 128) {
+  if (get_total_ram_mb() <= 120) {
     // Low memory mode: no wallpaper loaded or drawn
     uint32_t total = screen.width * screen.height;
     for (uint32_t i = 0; i < total; i++) {
@@ -896,7 +896,7 @@ void draw_settings_content(int x, int y, int w, int h, SettingsState &ss) {
                     global_mouse_speed == 3 ? 0x005A9E : 0x333333, 255);
     draw_string(x + 230, cy + 138, "Fast", 0xFFFFFF);
   } else {
-    if (get_total_ram_mb() > 128) {
+    if (get_total_ram_mb() > 120) {
       draw_string(x + 10, cy + 50, "Wallpaper", 0xDDDDDD);
       draw_rect_alpha(x + 10, cy + 70, 80, 25,
                       global_wallpaper == 0 ? 0x005A9E : 0x333333, 255);
@@ -928,8 +928,8 @@ void draw_settings_content(int x, int y, int w, int h, SettingsState &ss) {
                       global_wallpaper == 8 ? 0x005A9E : 0x333333, 255);
       draw_string(x + 205, cy + 138, "solarset", 0xFFFFFF);
     } else {
-      draw_string(x + 10, cy + 50, "Wallpaper (Disabled: RAM <= 128MB)", 0x888888);
-      draw_string(x + 10, cy + 80, "Wallpapers and effects require > 128MB RAM", 0x666666);
+      draw_string(x + 10, cy + 50, "Wallpaper (Disabled: RAM <= 120MB)", 0x888888);
+      draw_string(x + 10, cy + 80, "Wallpapers and effects require > 120MB RAM", 0x666666);
     }
 
     draw_string(x + 10, cy + 165, "Start Color", 0xDDDDDD);
@@ -1099,7 +1099,7 @@ void handle_settings_click(SettingsState &ss, int x, int y) {
     }
   } else {
     // Wallpaper clicks
-    if (get_total_ram_mb() > 128) {
+    if (get_total_ram_mb() > 120) {
       if (mouse_y >= cy + 70 && mouse_y <= cy + 95) {
         if (mouse_x >= x + 10 && mouse_x <= x + 90)
           global_wallpaper = 0;
@@ -2047,7 +2047,7 @@ void draw_all_ui(WinState &welcome, WinState &fm, WinState &calc,
                   "Welcome to 2.1.3 Appril", true);
       draw_string(welcome.x + 20, welcome.y + 50,
                   "Welcome to Milla OS 2.1.3 Appril", 0xFFFFFF);
-      if (get_total_ram_mb() > 128) {
+      if (get_total_ram_mb() > 120) {
         draw_image(welcome.x + 20, welcome.y + 80, 100, 100,
                    _binary_logo1_raw_start);
         draw_string(welcome.x + 140, welcome.y + 80,
