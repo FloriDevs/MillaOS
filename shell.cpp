@@ -158,7 +158,7 @@ void my_put_pixel(int x, int y, uint32_t color) {
 
 // Alpha blending: (src * alpha + dest * (255 - alpha)) / 255
 uint32_t blend(uint32_t src, uint32_t dest, uint8_t alpha) {
-  if (get_total_ram_mb() <= 128) {
+  if (get_total_ram_mb() <= 127) {
     return src;
   }
   uint32_t rb = (src & 0xFF00FF) * alpha + (dest & 0xFF00FF) * (256 - alpha);
