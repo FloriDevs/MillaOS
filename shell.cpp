@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include "image.h"
 
 struct Time {
   uint8_t hour;
@@ -288,7 +289,8 @@ void init_minimal_font() {
                      {'<', {0x0C, 0x18, 0x30, 0x60, 0x30, 0x18, 0x0C, 0x00}},
                      {'|', {0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x00}},
                      {'*', {0x00, 0x00, 0x14, 0x08, 0x3E, 0x08, 0x14, 0x00}},
-                     {'=', {0x00, 0x00, 0x7E, 0x00, 0x7E, 0x00, 0x00, 0x00}}};
+                     {'=', {0x00, 0x00, 0x7E, 0x00, 0x7E, 0x00, 0x00, 0x00}},
+                     {'%', {0x62, 0x66, 0x0C, 0x18, 0x30, 0x66, 0x46, 0x00}}};
   for (unsigned i = 0; i < sizeof(chars) / sizeof(chars[0]); i++) {
     for (int j = 0; j < 8; j++)
       font8x8_basic[(uint8_t)chars[i].c][j] = chars[i].data[j];
@@ -374,7 +376,9 @@ void draw_wallpaper() {
 
   uint32_t *wallpaper = nullptr;
 
-  if (global_wallpaper == 0) {
+  if (global_wallpaper == 99) {
+    wallpaper = active_wallpaper;
+  } else if (global_wallpaper == 0) {
     wallpaper = (uint32_t *)_binary_wp1_raw_start;
   } else {
     if (loaded_wallpaper_idx != global_wallpaper) {
@@ -444,13 +448,13 @@ void draw_top_bar() {
   if (global_bar_position == 1)
     bar_y = screen.height - 25;
 
-  draw_rect_alpha(0, bar_y, screen.width, 25, 0x000000, 160);
+  draw_rect_alpha(0, bar_y, screen.width, 25, 0x000000, 30);
 
   // Red menu button - top right
   int btn_x = screen.width - 70;
   uint32_t start_colors[] = {0xCC2222, 0x005A9E, 0x22CC22, 0x333333};
   uint32_t btn_color = start_colors[global_start_color_idx];
-  draw_rect_alpha(btn_x, bar_y + 2, 60, 21, btn_color, 230);
+  draw_rect_alpha(btn_x, bar_y + 2, 60, 21, btn_color, 70);
   draw_string(btn_x + 10, bar_y + 8, "Menu", 0xFFFFFF);
 
   uint32_t ram = get_total_ram_mb();
@@ -481,16 +485,17 @@ void draw_top_bar() {
 void draw_window(int x, int y, int w, int h, const char *title, bool active) {
   draw_rect_alpha(x + 4, y + 4, w, h, 0x000000, 80); // Shadow
   draw_rect_alpha(x, y, w, h, 0x1E1E1E, 250);
-  draw_rect_alpha(x, y, w, 28, active ? 0x005A9E : 0x333333, 255);
+  draw_rect_alpha(x, y, w, 28, active ? 0x06011f : 0x333333, 255);
+  
   draw_string(x + 10, y + 10, title, 0xFFFFFF);
-  draw_string(x + w - 40, y + 10, "- x", 0xFFFFFF);
+  draw_string(x + w - 40, y + 10, "- x", 0xd3564f);
 
   if (h > 28) {
     // Outer border outline
-    draw_rect_alpha(x, y, w, 1, 0x444444, 255);
-    draw_rect_alpha(x, y, 1, h, 0x444444, 255);
-    draw_rect_alpha(x + w - 1, y, 1, h, 0x444444, 255);
-    draw_rect_alpha(x, y + h - 1, w, 1, 0x444444, 255);
+    // draw_rect_alpha(x, y, w, 1, 0x444444, 255);
+    // draw_rect_alpha(x, y, 1, h, 0x444444, 255);
+    // draw_rect_alpha(x + w - 1, y, 1, h, 0x444444, 255);
+    // draw_rect_alpha(x, y + h - 1, w, 1, 0x444444, 255);
 
     // Resize grip handle in bottom-right corner
     int rx = x + w - 12;
@@ -665,7 +670,7 @@ void draw_file_manager_content(int x, int y, int w, int h, int selected,
       }
 
       draw_string(x + w - 80, list_y + i * row_height + 6,
-                  is_dir ? "DIR" : "FILE", text_color);
+                  is_dir ? "DIR" : (is_image_extension(name) ? "IMG" : "FILE"), text_color);
     }
 
     // Scroll indicator
@@ -2027,6 +2032,640 @@ void load_settings() {
   }
 }
 
+// ============================================================================
+// IMAGE VIEWER APP
+// ============================================================================
+
+struct ImageViewerState {
+  char filename[32];
+  char display_title[48];
+  char status_text[80];
+  int img_w;
+  int img_h;
+  bool has_image;
+  char format_name[8];
+  int zoom_mode; // 0: FIT, 1: 25%, 2: 50%, 3: 100%, 4: 150%, 5: 200%, 6: 300%, 7: 400%
+  int pan_x;
+  int pan_y;
+  bool panning;
+  int pan_start_mx;
+  int pan_start_my;
+  int pan_start_ox;
+  int pan_start_oy;
+  // Open dialog
+  bool show_dialog;
+  int dialog_scroll;
+  int dialog_selected;
+  // Navigation index
+  int current_file_idx;
+  int builtin_idx; // 0: logo1, 1: logo2, 2: wp1, -1: disk
+};
+
+static uint32_t imgview_pixels[IMG_MAX_W * IMG_MAX_H];
+static uint8_t imgview_file_buf[1920000 + 4096];
+static ImageViewerState ivs;
+static WinState imgview = {120, 60, 560, 420, false, false, false, 0, 0, false, 0, 0, 0, 0, 0, 0, 0};
+
+extern "C" uint32_t *get_image_viewer_pixels() { return imgview_pixels; }
+extern "C" uint8_t *get_image_viewer_file_buf() { return imgview_file_buf; }
+
+int imgview_get_zoom_percent(int canvas_w, int canvas_h) {
+  if (!ivs.has_image || ivs.img_w <= 0 || ivs.img_h <= 0) return 100;
+  if (ivs.zoom_mode == 0) { // FIT
+    if (canvas_w <= 0 || canvas_h <= 0) return 100;
+    int zw = (canvas_w * 100) / ivs.img_w;
+    int zh = (canvas_h * 100) / ivs.img_h;
+    int z = zw < zh ? zw : zh;
+    return z < 1 ? 1 : z;
+  }
+  switch (ivs.zoom_mode) {
+    case 1: return 25;
+    case 2: return 50;
+    case 3: return 100;
+    case 4: return 150;
+    case 5: return 200;
+    case 6: return 300;
+    case 7: return 400;
+    default: return 100;
+  }
+}
+
+void imgview_update_status(int canvas_w, int canvas_h) {
+  if (!ivs.has_image) {
+    string_copy(ivs.status_text, "No image loaded. Click [Open] to view images.");
+    string_copy(ivs.display_title, "Image Viewer");
+    return;
+  }
+  string_copy(ivs.display_title, "Image Viewer - ");
+  int tlen = string_length(ivs.display_title);
+  for (int i = 0; ivs.filename[i] && tlen < 46; i++) {
+    ivs.display_title[tlen++] = ivs.filename[i];
+  }
+  ivs.display_title[tlen] = '\0';
+
+  int pos = 0;
+  for (int i = 0; ivs.filename[i] && pos < 28; i++)
+    ivs.status_text[pos++] = ivs.filename[i];
+  ivs.status_text[pos++] = ' ';
+  ivs.status_text[pos++] = '(';
+  char num[12];
+  itoa_light(ivs.img_w, num);
+  for (int i = 0; num[i] && pos < 40; i++) ivs.status_text[pos++] = num[i];
+  ivs.status_text[pos++] = 'x';
+  itoa_light(ivs.img_h, num);
+  for (int i = 0; num[i] && pos < 50; i++) ivs.status_text[pos++] = num[i];
+  ivs.status_text[pos++] = ')';
+  ivs.status_text[pos++] = ' ';
+  for (int i = 0; ivs.format_name[i] && pos < 60; i++)
+    ivs.status_text[pos++] = ivs.format_name[i];
+  const char *sep = " | Zoom: ";
+  for (int i = 0; sep[i] && pos < 70; i++)
+    ivs.status_text[pos++] = sep[i];
+  int zoom = imgview_get_zoom_percent(canvas_w, canvas_h);
+  itoa_light(zoom, num);
+  for (int i = 0; num[i] && pos < 76; i++)
+    ivs.status_text[pos++] = num[i];
+  ivs.status_text[pos++] = '%';
+  ivs.status_text[pos] = '\0';
+}
+
+bool imgview_load_file(const char *filename) {
+  if (!filename || !filename[0]) return false;
+  shell_refresh_files();
+  if (!shell_is_fs_mounted()) return false;
+
+  int count = get_shell_file_count();
+  uint32_t fsize = 0;
+  int f_idx = -1;
+  for (int i = 0; i < count; i++) {
+    char fname[32];
+    get_shell_file_name(i, fname);
+    if (img_ends_with_ignore_case(fname, filename)) {
+      fsize = get_shell_file_size(i);
+      f_idx = i;
+      break;
+    }
+  }
+  if (f_idx == -1) return false;
+  if (fsize == 0 || fsize > sizeof(imgview_file_buf)) {
+    fsize = sizeof(imgview_file_buf);
+  }
+
+  char real_name[32];
+  get_shell_file_name(f_idx, real_name);
+  if (!shell_read_file(real_name, (char *)imgview_file_buf, sizeof(imgview_file_buf)))
+    return false;
+
+  int w = 0, h = 0;
+  char fmt[8] = {0};
+  if (!decode_any_image(imgview_file_buf, fsize, real_name, imgview_pixels, w, h, fmt))
+    return false;
+
+  ivs.img_w = w;
+  ivs.img_h = h;
+  string_copy(ivs.filename, real_name);
+  string_copy(ivs.format_name, fmt);
+  ivs.has_image = true;
+  ivs.zoom_mode = 0; // FIT
+  ivs.pan_x = 0;
+  ivs.pan_y = 0;
+  ivs.current_file_idx = f_idx;
+  ivs.builtin_idx = -1;
+  return true;
+}
+
+void imgview_load_builtin(int idx) {
+  ivs.builtin_idx = idx;
+  ivs.current_file_idx = -1;
+  ivs.zoom_mode = 0; // FIT
+  ivs.pan_x = 0;
+  ivs.pan_y = 0;
+  if (idx == 0) {
+    string_copy(ivs.filename, "LOGO1 (Built-in)");
+    string_copy(ivs.format_name, "RAW");
+    ivs.img_w = 100;
+    ivs.img_h = 100;
+    decode_raw(_binary_logo1_raw_start, 100 * 100 * 4, imgview_pixels, ivs.img_w, ivs.img_h);
+    ivs.has_image = true;
+  } else if (idx == 1) {
+    string_copy(ivs.filename, "LOGO2 (Built-in)");
+    string_copy(ivs.format_name, "RAW");
+    ivs.img_w = 80;
+    ivs.img_h = 80;
+    decode_raw(_binary_logo2_raw_start, 80 * 80 * 4, imgview_pixels, ivs.img_w, ivs.img_h);
+    ivs.has_image = true;
+  } else {
+    string_copy(ivs.filename, "WP1 (Built-in)");
+    string_copy(ivs.format_name, "RAW");
+    ivs.img_w = 800;
+    ivs.img_h = 600;
+    decode_raw(_binary_wp1_raw_start, 800 * 600 * 4, imgview_pixels, ivs.img_w, ivs.img_h);
+    ivs.has_image = true;
+  }
+}
+
+int imgview_get_total_images() {
+  int total = 3;
+  if (shell_is_fs_mounted()) {
+    int count = get_shell_file_count();
+    for (int i = 0; i < count; i++) {
+      if (!get_shell_file_is_dir(i)) {
+        char fn[32];
+        get_shell_file_name(i, fn);
+        if (is_image_extension(fn))
+          total++;
+      }
+    }
+  }
+  return total;
+}
+
+void imgview_get_item_info(int idx, char *name_out, char *desc_out) {
+  if (idx == 0) {
+    string_copy(name_out, "LOGO1 (Built-in)");
+    string_copy(desc_out, "100x100 RAW");
+    return;
+  } else if (idx == 1) {
+    string_copy(name_out, "LOGO2 (Built-in)");
+    string_copy(desc_out, "80x80 RAW");
+    return;
+  } else if (idx == 2) {
+    string_copy(name_out, "WP1 (Built-in)");
+    string_copy(desc_out, "800x600 RAW");
+    return;
+  }
+  int disk_target = idx - 3;
+  int current = 0;
+  if (shell_is_fs_mounted()) {
+    int count = get_shell_file_count();
+    for (int i = 0; i < count; i++) {
+      if (!get_shell_file_is_dir(i)) {
+        char fn[32];
+        get_shell_file_name(i, fn);
+        if (is_image_extension(fn)) {
+          if (current == disk_target) {
+            string_copy(name_out, fn);
+            uint32_t sz = get_shell_file_size(i);
+            char sz_str[16];
+            size_to_string(sz, sz_str);
+            string_copy(desc_out, sz_str);
+            return;
+          }
+          current++;
+        }
+      }
+    }
+  }
+  string_copy(name_out, "Unknown");
+  string_copy(desc_out, "");
+}
+
+void imgview_load_combined(int idx) {
+  int total = imgview_get_total_images();
+  if (total <= 0) return;
+  idx = (idx % total + total) % total;
+  if (idx < 3) {
+    imgview_load_builtin(idx);
+    return;
+  }
+  int disk_target = idx - 3;
+  int current = 0;
+  if (shell_is_fs_mounted()) {
+    int count = get_shell_file_count();
+    for (int i = 0; i < count; i++) {
+      if (!get_shell_file_is_dir(i)) {
+        char fn[32];
+        get_shell_file_name(i, fn);
+        if (is_image_extension(fn)) {
+          if (current == disk_target) {
+            imgview_load_file(fn);
+            return;
+          }
+          current++;
+        }
+      }
+    }
+  }
+}
+
+int imgview_get_current_index() {
+  if (ivs.builtin_idx >= 0)
+    return ivs.builtin_idx;
+  if (!shell_is_fs_mounted())
+    return 0;
+  int current = 0;
+  int count = get_shell_file_count();
+  for (int i = 0; i < count; i++) {
+    if (!get_shell_file_is_dir(i)) {
+      char fn[32];
+      get_shell_file_name(i, fn);
+      if (is_image_extension(fn)) {
+        if (i == ivs.current_file_idx || img_ends_with_ignore_case(fn, ivs.filename))
+          return 3 + current;
+        current++;
+      }
+    }
+  }
+  return 0;
+}
+
+void imgview_next_image() {
+  int cur = imgview_get_current_index();
+  imgview_load_combined(cur + 1);
+}
+
+void imgview_prev_image() {
+  int cur = imgview_get_current_index();
+  imgview_load_combined(cur - 1);
+}
+
+void imgview_zoom_in() {
+  if (ivs.zoom_mode == 0) {
+    ivs.zoom_mode = 3; // FIT -> 100%
+  } else if (ivs.zoom_mode < 7) {
+    ivs.zoom_mode++;
+  }
+}
+
+void imgview_zoom_out() {
+  if (ivs.zoom_mode == 0) {
+    ivs.zoom_mode = 2; // FIT -> 50%
+  } else if (ivs.zoom_mode > 1) {
+    ivs.zoom_mode--;
+  }
+}
+
+void imgview_set_as_wallpaper() {
+  if (!ivs.has_image || ivs.img_w <= 0 || ivs.img_h <= 0) return;
+  for (int y = 0; y < 600; y++) {
+    int sy = (y * ivs.img_h) / 600;
+    for (int x = 0; x < 800; x++) {
+      int sx = (x * ivs.img_w) / 800;
+      uint32_t col = imgview_pixels[sy * ivs.img_w + sx];
+      uint8_t r = (col >> 16) & 0xFF;
+      uint8_t g = (col >> 8) & 0xFF;
+      uint8_t b = col & 0xFF;
+      active_wallpaper[y * 800 + x] = (uint32_t)r | ((uint32_t)g << 8) | ((uint32_t)b << 16);
+    }
+  }
+  global_wallpaper = 99;
+  loaded_wallpaper_idx = 99;
+  wallpaper_file_load_failed = false;
+  save_settings();
+}
+
+void draw_image_viewer_content(int x, int y, int w, int h) {
+  int content_y = y + 28;
+  int content_h = h - 28;
+  int toolbar_y = content_y;
+  int toolbar_h = 28;
+  int status_h = 20;
+  int status_y = y + h - status_h;
+
+  int canvas_x = x + 1;
+  int canvas_y = toolbar_y + toolbar_h;
+  int canvas_w = w - 2;
+  int canvas_h = content_h - toolbar_h - status_h;
+
+  // --- Toolbar ---
+  draw_rect_alpha(x, toolbar_y, w, toolbar_h, 0x252526, 255);
+
+  auto draw_btn = [&](int bx, int by, int bw, int bh, const char *lbl, uint32_t base_col) {
+    bool hover = (mouse_x >= bx && mouse_x < bx + bw && mouse_y >= by && mouse_y < by + bh);
+    uint32_t col = hover ? blend(base_col, 0xFFFFFF, 200) : base_col;
+    draw_rect_alpha(bx, by, bw, bh, col, 255);
+    draw_string(bx + 6, by + 6, lbl, 0xFFFFFF);
+  };
+
+  draw_btn(x + 6,   toolbar_y + 4, 44, 20, "Open", 0x005A9E);
+  draw_btn(x + 54,  toolbar_y + 4, 52, 20, "< Prev", 0x333333);
+  draw_btn(x + 110, toolbar_y + 4, 52, 20, "Next >", 0x333333);
+  draw_btn(x + 166, toolbar_y + 4, 24, 20, "-", 0x333333);
+  draw_btn(x + 194, toolbar_y + 4, 24, 20, "+", 0x333333);
+  draw_btn(x + 222, toolbar_y + 4, 38, 20, "Fit", 0x333333);
+  draw_btn(x + 264, toolbar_y + 4, 38, 20, "1:1", 0x333333);
+  draw_btn(x + 306, toolbar_y + 4, 88, 20, "Wallpaper", 0x1F6F28);
+
+  draw_rect_alpha(x, toolbar_y + toolbar_h - 1, w, 1, 0x3F3F46, 255);
+
+  // --- Canvas Area ---
+  if (canvas_w > 0 && canvas_h > 0) {
+    for (int cy = canvas_y; cy < canvas_y + canvas_h; cy++) {
+      for (int cx = canvas_x; cx < canvas_x + canvas_w; cx++) {
+        bool check = (((cx - canvas_x) / 16) + ((cy - canvas_y) / 16)) % 2 == 0;
+        my_put_pixel(cx, cy, check ? 0x141414 : 0x1F1F1F);
+      }
+    }
+
+    if (ivs.has_image && ivs.img_w > 0 && ivs.img_h > 0) {
+      int disp_w = ivs.img_w;
+      int disp_h = ivs.img_h;
+      if (ivs.zoom_mode == 0) { // FIT
+        if (ivs.img_w * canvas_h > canvas_w * ivs.img_h) {
+          disp_w = canvas_w;
+          disp_h = (ivs.img_h * canvas_w) / ivs.img_w;
+        } else {
+          disp_h = canvas_h;
+          disp_w = (ivs.img_w * canvas_h) / ivs.img_h;
+        }
+      } else {
+        int percent = imgview_get_zoom_percent(canvas_w, canvas_h);
+        disp_w = (ivs.img_w * percent) / 100;
+        disp_h = (ivs.img_h * percent) / 100;
+      }
+      if (disp_w < 1) disp_w = 1;
+      if (disp_h < 1) disp_h = 1;
+
+      int draw_x = canvas_x + (canvas_w - disp_w) / 2 + ivs.pan_x;
+      int draw_y = canvas_y + (canvas_h - disp_h) / 2 + ivs.pan_y;
+
+      int clip_x1 = canvas_x;
+      int clip_y1 = canvas_y;
+      int clip_x2 = canvas_x + canvas_w;
+      int clip_y2 = canvas_y + canvas_h;
+
+      int x_start = draw_x < clip_x1 ? clip_x1 : draw_x;
+      int x_end   = (draw_x + disp_w) > clip_x2 ? clip_x2 : (draw_x + disp_w);
+      int y_start = draw_y < clip_y1 ? clip_y1 : draw_y;
+      int y_end   = (draw_y + disp_h) > clip_y2 ? clip_y2 : (draw_y + disp_h);
+
+      for (int cy = y_start; cy < y_end; cy++) {
+        int src_y = ((cy - draw_y) * ivs.img_h) / disp_h;
+        if (src_y < 0) src_y = 0;
+        if (src_y >= ivs.img_h) src_y = ivs.img_h - 1;
+        int row_off = src_y * ivs.img_w;
+        for (int cx = x_start; cx < x_end; cx++) {
+          int src_x = ((cx - draw_x) * ivs.img_w) / disp_w;
+          if (src_x < 0) src_x = 0;
+          if (src_x >= ivs.img_w) src_x = ivs.img_w - 1;
+          my_put_pixel(cx, cy, imgview_pixels[row_off + src_x]);
+        }
+      }
+    } else {
+      draw_string(canvas_x + (canvas_w - 240) / 2, canvas_y + canvas_h / 2 - 4,
+                  "No image loaded. Click [Open].", 0x888888);
+    }
+  }
+
+  // --- Status Bar ---
+  draw_rect_alpha(x, status_y, w, status_h, 0x1A1A1A, 255);
+  draw_rect_alpha(x, status_y, w, 1, 0x333333, 255);
+  imgview_update_status(canvas_w, canvas_h);
+  draw_string(x + 10, status_y + 6, ivs.status_text, 0xCCCCCC);
+
+  // --- Modal Open Dialog ---
+  if (ivs.show_dialog && canvas_w > 0 && canvas_h > 0) {
+    int dw = 320;
+    int dh = 240;
+    if (dw > canvas_w - 20) dw = canvas_w - 20;
+    if (dh > canvas_h - 20) dh = canvas_h - 20;
+    int dx = canvas_x + (canvas_w - dw) / 2;
+    int dy = canvas_y + (canvas_h - dh) / 2;
+
+    draw_rect_alpha(dx + 4, dy + 4, dw, dh, 0x000000, 100);
+    draw_rect_alpha(dx, dy, dw, dh, 0x1E1E2E, 250);
+    draw_rect_alpha(dx, dy, dw, 24, 0x005A9E, 255);
+    draw_string(dx + 10, dy + 8, "Select Image to Open", 0xFFFFFF);
+
+    draw_rect_alpha(dx, dy, dw, 1, 0x444444, 255);
+    draw_rect_alpha(dx, dy, 1, dh, 0x444444, 255);
+    draw_rect_alpha(dx + dw - 1, dy, 1, dh, 0x444444, 255);
+    draw_rect_alpha(dx, dy + dh - 1, dw, 1, 0x444444, 255);
+
+    int total_imgs = imgview_get_total_images();
+    int list_y = dy + 28;
+    int row_h = 22;
+    int max_rows = (dh - 60) / row_h;
+
+    for (int i = 0; i < max_rows && (i + ivs.dialog_scroll) < total_imgs; i++) {
+      int item_idx = i + ivs.dialog_scroll;
+      char iname[32];
+      char idesc[16];
+      imgview_get_item_info(item_idx, iname, idesc);
+
+      int ry = list_y + i * row_h;
+      bool hover = (mouse_x >= dx + 6 && mouse_x < dx + dw - 6 && mouse_y >= ry && mouse_y < ry + row_h);
+      uint32_t rbg = hover ? 0x005A9E : (item_idx % 2 == 0 ? 0x252526 : 0x1E1E1E);
+      draw_rect_alpha(dx + 6, ry, dw - 12, row_h - 2, rbg, 255);
+      draw_string(dx + 12, ry + 5, iname, 0xFFFFFF);
+      draw_string(dx + dw - 80, ry + 5, idesc, 0xAAAAAA);
+    }
+
+    int cbw = 60, cbh = 20;
+    int cbx = dx + dw - cbw - 10;
+    int cby = dy + dh - cbh - 8;
+    bool c_hover = (mouse_x >= cbx && mouse_x < cbx + cbw && mouse_y >= cby && mouse_y < cby + cbh);
+    draw_rect_alpha(cbx, cby, cbw, cbh, c_hover ? 0x555555 : 0x3A3A3C, 255);
+    draw_string(cbx + 10, cby + 6, "Cancel", 0xFFFFFF);
+  }
+}
+
+void handle_image_viewer_click(int x, int y, int w, int h) {
+  int content_y = y + 28;
+  int content_h = h - 28;
+  int toolbar_y = content_y;
+  int toolbar_h = 28;
+  int status_h = 20;
+
+  int canvas_x = x + 1;
+  int canvas_y = toolbar_y + toolbar_h;
+  int canvas_w = w - 2;
+  int canvas_h = content_h - toolbar_h - status_h;
+
+  if (ivs.show_dialog && canvas_w > 0 && canvas_h > 0) {
+    int dw = 320;
+    int dh = 240;
+    if (dw > canvas_w - 20) dw = canvas_w - 20;
+    if (dh > canvas_h - 20) dh = canvas_h - 20;
+    int dx = canvas_x + (canvas_w - dw) / 2;
+    int dy = canvas_y + (canvas_h - dh) / 2;
+
+    int cbw = 60, cbh = 20;
+    int cbx = dx + dw - cbw - 10;
+    int cby = dy + dh - cbh - 8;
+    if (mouse_x >= cbx && mouse_x < cbx + cbw && mouse_y >= cby && mouse_y < cby + cbh) {
+      ivs.show_dialog = false;
+      return;
+    }
+
+    int total_imgs = imgview_get_total_images();
+    int list_y = dy + 28;
+    int row_h = 22;
+    int max_rows = (dh - 60) / row_h;
+    if (mouse_x >= dx + 6 && mouse_x < dx + dw - 6 &&
+        mouse_y >= list_y && mouse_y < list_y + max_rows * row_h) {
+      int clicked = (mouse_y - list_y) / row_h + ivs.dialog_scroll;
+      if (clicked >= 0 && clicked < total_imgs) {
+        imgview_load_combined(clicked);
+        ivs.show_dialog = false;
+        return;
+      }
+    }
+
+    if (mouse_x < dx || mouse_x >= dx + dw || mouse_y < dy || mouse_y >= dy + dh) {
+      ivs.show_dialog = false;
+    }
+    return;
+  }
+
+  // Toolbar clicks
+  if (mouse_y >= toolbar_y + 4 && mouse_y < toolbar_y + 24) {
+    if (mouse_x >= x + 6 && mouse_x < x + 50) {
+      ivs.show_dialog = true;
+      ivs.dialog_scroll = 0;
+      return;
+    }
+    if (mouse_x >= x + 54 && mouse_x < x + 106) {
+      imgview_prev_image();
+      return;
+    }
+    if (mouse_x >= x + 110 && mouse_x < x + 162) {
+      imgview_next_image();
+      return;
+    }
+    if (mouse_x >= x + 166 && mouse_x < x + 190) {
+      imgview_zoom_out();
+      return;
+    }
+    if (mouse_x >= x + 194 && mouse_x < x + 218) {
+      imgview_zoom_in();
+      return;
+    }
+    if (mouse_x >= x + 222 && mouse_x < x + 260) {
+      ivs.zoom_mode = 0; // Fit
+      ivs.pan_x = 0; ivs.pan_y = 0;
+      return;
+    }
+    if (mouse_x >= x + 264 && mouse_x < x + 302) {
+      ivs.zoom_mode = 3; // 1:1
+      ivs.pan_x = 0; ivs.pan_y = 0;
+      return;
+    }
+    if (mouse_x >= x + 306 && mouse_x < x + 394) {
+      imgview_set_as_wallpaper();
+      return;
+    }
+  }
+
+  // Canvas click -> start panning
+  if (mouse_x >= canvas_x && mouse_x < canvas_x + canvas_w &&
+      mouse_y >= canvas_y && mouse_y < canvas_y + canvas_h) {
+    ivs.panning = true;
+    ivs.pan_start_mx = mouse_x;
+    ivs.pan_start_my = mouse_y;
+    ivs.pan_start_ox = ivs.pan_x;
+    ivs.pan_start_oy = ivs.pan_y;
+  }
+}
+
+void handle_image_viewer_pan(int mx, int my) {
+  if (ivs.panning) {
+    ivs.pan_x = ivs.pan_start_ox + (mx - ivs.pan_start_mx);
+    ivs.pan_y = ivs.pan_start_oy + (my - ivs.pan_start_my);
+  }
+}
+
+void handle_image_viewer_key(uint8_t scancode) {
+  if (scancode & 0x80) return;
+  if (ivs.show_dialog) {
+    if (scancode == 0x01) { // Escape
+      ivs.show_dialog = false;
+    } else if (scancode == 0x48) { // Up arrow
+      if (ivs.dialog_scroll > 0) ivs.dialog_scroll--;
+    } else if (scancode == 0x50) { // Down arrow
+      int total = imgview_get_total_images();
+      if (ivs.dialog_scroll + 1 < total) ivs.dialog_scroll++;
+    } else if (scancode == 0x1C) { // Enter
+      imgview_load_combined(ivs.dialog_scroll);
+      ivs.show_dialog = false;
+    }
+    return;
+  }
+
+  switch (scancode) {
+    case 0x4B: // Left arrow
+    case 0x19: // 'P'
+      imgview_prev_image();
+      break;
+    case 0x4D: // Right arrow
+    case 0x31: // 'N'
+      imgview_next_image();
+      break;
+    case 0x0D: // '=' / '+'
+    case 0x4E: // numpad '+'
+      imgview_zoom_in();
+      break;
+    case 0x0C: // '-'
+    case 0x4A: // numpad '-'
+      imgview_zoom_out();
+      break;
+    case 0x21: // 'F'
+      ivs.zoom_mode = 0;
+      ivs.pan_x = 0; ivs.pan_y = 0;
+      break;
+    case 0x02: // '1'
+      ivs.zoom_mode = 3;
+      ivs.pan_x = 0; ivs.pan_y = 0;
+      break;
+    case 0x11: // 'W'
+      imgview_set_as_wallpaper();
+      break;
+    case 0x18: // 'O'
+      ivs.show_dialog = true;
+      ivs.dialog_scroll = 0;
+      break;
+    case 0x48: // Up arrow -> pan up
+      ivs.pan_y += 20;
+      break;
+    case 0x50: // Down arrow -> pan down
+      ivs.pan_y -= 20;
+      break;
+    case 0x01: // Escape
+      imgview.open = false;
+      break;
+  }
+}
+
 static int fm_selected = 0;
 static int fm_scroll = 0;
 static bool fm_files_loaded = false;
@@ -2044,14 +2683,14 @@ void draw_all_ui(WinState &welcome, WinState &fm, WinState &calc,
   if (welcome.open) {
     if (!welcome.minimized) {
       draw_window(welcome.x, welcome.y, welcome.w, welcome.h,
-                  "Welcome to 2.1.3 Appril", true);
+                  "Welcome to MillaOS", true);
       draw_string(welcome.x + 20, welcome.y + 50,
-                  "Welcome to Milla OS 2.1.3 Appril", 0xFFFFFF);
+                  "Welcome to Milla OS 2.1.5 Daisy", 0xFFFFFF);
       if (get_total_ram_mb() > 120) {
         draw_image(welcome.x + 20, welcome.y + 80, 100, 100,
                    _binary_logo1_raw_start);
         draw_string(welcome.x + 140, welcome.y + 80,
-                    "Milla OS 2.1.3 Appril is a FOSS Operating System.",
+                    "Milla OS 2.1.5 Daisy is a FOSS Operating System.",
                     0xDDDDDD);
         draw_string(welcome.x + 140, welcome.y + 100,
                     "Written in C++ in Germany.", 0xDDDDDD);
@@ -2062,7 +2701,7 @@ void draw_all_ui(WinState &welcome, WinState &fm, WinState &calc,
                     "(c) 2025 - 2026 codeberg.orgFloriDevs", 0xAAAAAA);
       } else {
         draw_string(welcome.x + 20, welcome.y + 80,
-                    "Milla OS 2.1.3 Appril is a FOSS Operating System.",
+                    "Milla OS is a FOSS Operating System.",
                     0xDDDDDD);
         draw_string(welcome.x + 20, welcome.y + 100,
                     "Written in C++ in Germany.", 0xDDDDDD);
@@ -2151,15 +2790,26 @@ void draw_all_ui(WinState &welcome, WinState &fm, WinState &calc,
     }
   }
 
+  // Draw Image Viewer window
+  if (imgview.open) {
+    if (!imgview.minimized) {
+      draw_window(imgview.x, imgview.y, imgview.w, imgview.h,
+                  ivs.has_image ? ivs.display_title : "Image Viewer", true);
+      draw_image_viewer_content(imgview.x, imgview.y, imgview.w, imgview.h);
+    } else {
+      draw_window(imgview.x, imgview.y, imgview.w, 28, "Image Viewer", true);
+    }
+  }
+
   draw_top_bar();
 }
 
 void draw_menu_dropdown() {
   int mw = 180;
   int item_h = 30;
-  int item_count = 7;
+  int item_count = 8;
   int mh = item_count * item_h + 10;
-  int mx = (screen.width - mw) / 2;
+  int mx = (screen.width - mw) / 2 - 20;
   int my = (screen.height - mh) / 2;
 
   if (global_menu_style == 1) {
@@ -2169,12 +2819,12 @@ void draw_menu_dropdown() {
   }
 
   // Drop shadow + transparent dark background (like top bar)
-  draw_rect_alpha(mx + 4, my + 4, mw, mh, 0x000000, 80);
-  draw_rect_alpha(mx, my, mw, mh, 0x000000, 180);
+  draw_rect_alpha(mx + 4, my + 4, mw, mh, 0x000000, 70);
+  draw_rect_alpha(mx, my, mw, mh, 0x000000, 70);
 
-  const char *labels[7] = {"Welcome",     "File Manager", "Calculator",
-                           "Documents",   "Spreadsheet",  "Settings",
-                           "Disk Manager"};
+  const char *labels[8] = {"Milla Welcome",     "MP-Files", "MP-Calc",
+                           "MP-Texts",   "MP-Sheet",  "Settings",
+                           "MP-Diskman", "MP-ImgViewer"};
   for (int i = 0; i < item_count; i++) {
     int iy = my + 5 + i * item_h;
     // Hover highlight
@@ -2441,6 +3091,27 @@ extern "C" void start_graphical_shell() {
       needs_redraw = true;
     }
 
+    if (scancode == 0x3C) { // F2 - File Manager
+      fm.open = !fm.open;
+      fm.minimized = false;
+      if (!fm_files_loaded) {
+        shell_refresh_files();
+        fm_files_loaded = true;
+        fm_selected = 0;
+        fm_scroll = 0;
+      }
+      needs_redraw = true;
+    }
+
+    if (scancode == 0x3D) { // F3 - Image Viewer
+      if (!ivs.has_image) {
+        imgview_load_builtin(0);
+      }
+      imgview.open = !imgview.open;
+      imgview.minimized = false;
+      needs_redraw = true;
+    }
+
     if (scancode == 0x58) { // F12 - Switch to CLI
       break;
     }
@@ -2519,6 +3190,11 @@ extern "C" void start_graphical_shell() {
     if (scancode != 0 && mpra_win.open && !mpra_win.minimized &&
         !mpra_win.dragging) {
       mpra_handle_key(scancode);
+      needs_redraw = true;
+    }
+
+    if (scancode != 0 && imgview.open && !imgview.minimized && !imgview.dragging) {
+      handle_image_viewer_key(scancode);
       needs_redraw = true;
     }
 
@@ -2650,6 +3326,12 @@ extern "C" void start_graphical_shell() {
           } else if (item == 6) { // Disk Manager
             disk_manager.open = true;
             disk_manager.minimized = false;
+          } else if (item == 7) { // Image Viewer
+            if (!ivs.has_image) {
+              imgview_load_builtin(0);
+            }
+            imgview.open = true;
+            imgview.minimized = false;
           }
         }
         menu_open = false;
@@ -2698,6 +3380,12 @@ extern "C" void start_graphical_shell() {
         mpra_handle_click(mouse_x - mpra_win.x, mouse_y - content_y);
         needs_redraw = true;
       }
+    }
+
+    // --- Image Viewer content clicks ---
+    if (mouse_clicked && imgview.open && !imgview.minimized) {
+      handle_image_viewer_click(imgview.x, imgview.y, imgview.w, imgview.h);
+      needs_redraw = true;
     }
 
     // --- File Manager content clicks ---
@@ -2830,8 +3518,13 @@ extern "C" void start_graphical_shell() {
                 fm_selected = 0;
                 fm_scroll = 0;
               } else {
-                // Check if .mru file
-                int name_len = string_length(name);
+                if (is_image_extension(name)) {
+                  imgview_load_file(name);
+                  imgview.open = true;
+                  imgview.minimized = false;
+                } else {
+                  // Check if .mru file
+                  int name_len = string_length(name);
                 bool is_mpra = false;
                 if (name_len > 4) {
                   if (name[name_len - 4] == '.' &&
@@ -2865,6 +3558,7 @@ extern "C" void start_graphical_shell() {
                 }
               }
             }
+          }
             fm_selected = new_sel;
             needs_redraw = true;
           }
@@ -2883,9 +3577,11 @@ extern "C" void start_graphical_shell() {
             if (!handle_window_titlebar(word, mouse_x, mouse_y, true)) {
               if (!handle_window_titlebar(calc, mouse_x, mouse_y, true)) {
                 if (!handle_window_titlebar(fm, mouse_x, mouse_y, true)) {
-                  if (!handle_window_titlebar(mpra_win, mouse_x, mouse_y,
-                                              true)) {
-                    handle_window_titlebar(welcome, mouse_x, mouse_y, true);
+                  if (!handle_window_titlebar(imgview, mouse_x, mouse_y, true)) {
+                    if (!handle_window_titlebar(mpra_win, mouse_x, mouse_y,
+                                                true)) {
+                      handle_window_titlebar(welcome, mouse_x, mouse_y, true);
+                    }
                   }
                 }
               }
@@ -2903,9 +3599,9 @@ extern "C" void start_graphical_shell() {
     if (mouse_released) {
       if (welcome.dragging || fm.dragging || calc.dragging || word.dragging ||
           tabels.dragging || settings.dragging || disk_manager.dragging ||
-          mpra_win.dragging || welcome.resizing || fm.resizing ||
+          mpra_win.dragging || imgview.dragging || welcome.resizing || fm.resizing ||
           calc.resizing || word.resizing || tabels.resizing ||
-          settings.resizing || disk_manager.resizing || mpra_win.resizing) {
+          settings.resizing || disk_manager.resizing || mpra_win.resizing || imgview.resizing) {
         if (welcome.dragging)
           welcome.minimized = false;
         if (fm.dragging)
@@ -2922,6 +3618,8 @@ extern "C" void start_graphical_shell() {
           disk_manager.minimized = false;
         if (mpra_win.dragging)
           mpra_win.minimized = false;
+        if (imgview.dragging)
+          imgview.minimized = false;
         needs_redraw = true;
       }
       welcome.dragging = false; welcome.resizing = false;
@@ -2932,6 +3630,8 @@ extern "C" void start_graphical_shell() {
       settings.dragging = false; settings.resizing = false;
       disk_manager.dragging = false; disk_manager.resizing = false;
       mpra_win.dragging = false; mpra_win.resizing = false;
+      imgview.dragging = false; imgview.resizing = false;
+      ivs.panning = false;
     }
 
     // --- Dragging & Resizing ---
@@ -2976,6 +3676,11 @@ extern "C" void start_graphical_shell() {
         mpra_win.y = mouse_y - mpra_win.drag_oy;
         needs_redraw = true;
       }
+      if (imgview.dragging) {
+        imgview.x = mouse_x - imgview.drag_ox;
+        imgview.y = mouse_y - imgview.drag_oy;
+        needs_redraw = true;
+      }
 
       if (welcome.resizing) { update_window_resize(welcome, mouse_x, mouse_y); needs_redraw = true; }
       if (fm.resizing) { update_window_resize(fm, mouse_x, mouse_y); needs_redraw = true; }
@@ -2985,6 +3690,8 @@ extern "C" void start_graphical_shell() {
       if (settings.resizing) { update_window_resize(settings, mouse_x, mouse_y); needs_redraw = true; }
       if (disk_manager.resizing) { update_window_resize(disk_manager, mouse_x, mouse_y); needs_redraw = true; }
       if (mpra_win.resizing) { update_window_resize(mpra_win, mouse_x, mouse_y); needs_redraw = true; }
+      if (imgview.resizing) { update_window_resize(imgview, mouse_x, mouse_y); needs_redraw = true; }
+      if (ivs.panning && mouse_left) { handle_image_viewer_pan(mouse_x, mouse_y); needs_redraw = true; }
     }
 
     // --- Redraw ---
